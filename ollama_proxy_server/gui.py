@@ -403,12 +403,10 @@ def create_gui(server_config, log_file_path, models_file_path, users_file_path):
 
                         )
 
+                        model_name = gr.Textbox(label="Model to add", type="text")
+                        add_model_btn = gr.Button("Add new Model")
                         with gr.Row(visible=False) as model_management:
-                            with gr.Column():
-                                model_name = gr.Textbox(label="Model to add", type="text")
-                            with gr.Column():
-                                add_model_btn = gr.Button("Add new Model")
-                                remove_model_btn = gr.Button("Remove Model")
+                            remove_model_btn = gr.Button("Remove Model")
 
                     with gr.Column(scale=1, visible=False) as worker_model_management:
                         gr.Markdown("## Available Models")
@@ -669,7 +667,7 @@ if __name__ == "__main__":
     4. add ollama config fastAPI
     5. add worker button -> save in config
     6. add_model button api call
-    7. make add_modell button public
+    7. make add_modell button public -- finished
     8. add_user button
     9. test using VM (SCS-AI-PROXY)
 
