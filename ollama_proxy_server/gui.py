@@ -1,10 +1,16 @@
+import argparse
+import configparser
+import random
+import threading
+from queue import Queue
 import gradio as gr
 from pathlib import Path
 import requests
 import pandas as pd
-from add_user import generate_key
 import json
 import os
+import csv
+from proxy import RequestHandler, ThreadedHTTPServer
 
 CORRECT_PASSWORD = os.environ.get("ADMIN_PASSWORD")
 if not CORRECT_PASSWORD:
@@ -13,6 +19,47 @@ if not CORRECT_PASSWORD:
 OLLAMA_HELPER_API_KEY = os.environ.get("OLLAMA_HELPER_API_KEY")
 if not OLLAMA_HELPER_API_KEY:
     raise RuntimeError(f"OLLAMA_HELPER_API_KEY environment variable not set. Please provide a secret OLLAMA_HELPER_API_KEY.")
+
+
+def generate_key(length=10):
+    """Generate a random key of given length"""
+    chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}|;,.<>?/~'
+    return ''.join(random.choice(chars) for _ in range(length))
+
+
+def get_authorized_users(filename):
+    authorized_users = {}
+    user_info_list = []
+
+    if not Path(filename).exists():
+        print(f"Authorized users file {filename} not found. No users will be loaded.")
+        return authorized_users, user_info_list
+
+    with open(filename, 'r', newline='') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if not row.get("user") or not row.get("accessKey"):
+                print(f"Missing 'User' or 'Access Key' in row: {row}")
+                continue
+            authorized_users[row["user"]] = row["accessKey"]
+            user_info_list.append(row)
+
+    return authorized_users, user_info_list
+
+
+def get_config(filename):
+    config = configparser.ConfigParser()
+    if not Path(filename).exists():
+        print(f"Config file {filename} not found. No servers will be loaded.")
+        return []
+    config.read(filename)
+    parsed_servers = []
+    for name in config.sections():
+        try:
+            parsed_servers.append((name, {'url': config[name]['url'], 'queue': Queue()}))
+        except KeyError:
+            print(f"Server entry '{name}' in {filename} is missing 'url'. Skipping.")
+    return parsed_servers
 
 
 def login(password):
@@ -222,7 +269,7 @@ def get_worker_models(server_config, models_file_path):
     return pd.DataFrame(worker_status_list, columns=["Worker", "Missing", "Additional"])
 
 
-def get_users(users_file_path, get_authorized_users):
+def get_users(users_file_path):
     _, users = get_authorized_users(users_file_path)
     users = [(user['user'], user['expirationDate'], user['accessKey']) for user in users]
     return pd.DataFrame(users, columns=["user", "expirationDate", "accessKey"])
@@ -312,7 +359,7 @@ def remove_expired_users(users):
     return 0
 
 
-def create_gui(server_config, log_file_path, models_file_path, users_file_path, get_authorized_users):
+def create_gui(server_config, log_file_path, models_file_path, users_file_path):
     """
     Creates the Gradio interface.
     """
@@ -519,7 +566,7 @@ def create_gui(server_config, log_file_path, models_file_path, users_file_path, 
             logs = get_logs(log_file_path, num_lines=default_log_lines)
             models = get_global_models(models_file_path)
             worker_status = get_worker_models(server_config, models_file_path)
-            users = get_users(users_file_path, get_authorized_users)
+            users = get_users(users_file_path)
             return server_status, logs, models, worker_status, users
 
         demo.load(
@@ -531,15 +578,15 @@ def create_gui(server_config, log_file_path, models_file_path, users_file_path, 
     return demo
 
 
-def launch_gui(gui_port_to_use, server_config, log_file_path, models_file_path, users_file_path, get_authorized_users):
+def start_gui(gui_port_to_use, server_config, log_file_path, models_file_path, users_file_path):
     """
     Launches the Gradio GUI.
     Passes the server config getter to create_gui.
 
-    launch command: python main.py --config ../config.ini --users_list ../authorized_users.txt --log_path access_log.txt --port 8000 --gui_port 7860 --model ../models.txt
+    launch command: python proxy.py --config ../config.ini --users_list ../authorized_users.txt --log_path access_log.txt --port 8000 --gui_port 7860 --model ../models.txt
     """
     print("GUI: Attempting to launch Gradio GUI...")
-    gui_app = create_gui(server_config, log_file_path, models_file_path, users_file_path, get_authorized_users)
+    gui_app = create_gui(server_config, log_file_path, models_file_path, users_file_path)
     try:
         gui_app.launch(server_name="localhost", server_port=int(gui_port_to_use), share=False, show_api=False)
         print(f"GUI: Gradio GUI is running on http://localhost:{gui_port_to_use}")
@@ -547,11 +594,77 @@ def launch_gui(gui_port_to_use, server_config, log_file_path, models_file_path, 
         print(f"GUI Error: Failed to launch Gradio GUI: {e}")
 
 
+def start_proxy_server(port, request_handler_class):
+    """Starts the HTTP proxy server."""
+    try:
+        proxy_server = ThreadedHTTPServer(('', port), request_handler_class)
+        print(f'Running Ollama proxy server on port {port}')
+        proxy_server.serve_forever()
+    except OSError as e:
+        print(f"Could not start proxy server on port {port}: {e}")
+        print("The port might be already in use.")
+    except Exception as e:
+        print(f"An unexpected error occurred while starting the proxy server: {e}")
+
+
+def main():
+    global SERVERS_CONFIG, AUTHORIZED_USERS, CONFIG_FILE_PATH, USERS_FILE_PATH, LOG_FILE_PATH, DEACTIVATE_SECURITY
+
+    parser = argparse.ArgumentParser(description="Ollama Proxy Server with Security and Load Balancing")
+    parser.add_argument('--config', default="config.ini", help='Path to the server configuration file (default: config.ini)')
+    parser.add_argument('--log_path', default="access_log.txt", help='Path to the access log file (default: access_log.txt)')
+    parser.add_argument('--users_list', default="authorized_users.txt", help='Path to the authorized users list file (default: authorized_users.txt)')
+    parser.add_argument('--models', default="models.txt", help='Models available on all workers (default: models.txt)')
+    parser.add_argument('--port', type=int, default=8000, help='Port number for the proxy server (default: 8000)')
+    parser.add_argument('--gui_port', type=int, default=7860, help='Port number for the Gradio GUI (default: 7860)')
+    parser.add_argument('-d', '--deactivate_security', action='store_true', help='Deactivates security layer (USE WITH CAUTION)')
+    parser.add_argument('--no-gui', action='store_true', help='Do not launch the Gradio GUI')
+    args = parser.parse_args()
+
+    CONFIG_FILE_PATH = args.config
+    USERS_FILE_PATH = args.users_list
+    LOG_FILE_PATH = args.log_path
+    DEACTIVATE_SECURITY = args.deactivate_security
+    MODELS_FILE_PATH = args.models
+
+    SERVERS_CONFIG = get_config(CONFIG_FILE_PATH)
+    AUTHORIZED_USERS, _ = get_authorized_users(USERS_FILE_PATH)
+
+    print("Ollama Proxy server")
+
+    print(f"Configuration file: {CONFIG_FILE_PATH}")
+    print(f"Users list file: {USERS_FILE_PATH}")
+    print(f"Log file: {LOG_FILE_PATH}")
+
+    proxy_thread = threading.Thread(target=start_proxy_server, args=(args.port, RequestHandler), daemon=True)
+    proxy_thread.start()
+
+    if not args.no_gui:
+
+        start_gui(args.gui_port,
+                  SERVERS_CONFIG,
+                  LOG_FILE_PATH,
+                  MODELS_FILE_PATH,
+                  USERS_FILE_PATH)
+
+    if proxy_thread.is_alive():
+        try:
+            while proxy_thread.is_alive():
+                proxy_thread.join(timeout=1)
+        except KeyboardInterrupt:
+            print("\nShutdown signal received. Exiting.")
+        finally:
+            print("Ollama Proxy Server shut down.")
+
+
+if __name__ == "__main__":
+    main()
+
 """
     TODO List
-    
-    1. push to correct gitlab repo
-    2. refactor: gui starts server
+
+    1. push to correct gitlab repo -- finished
+    2. refactor: gui starts server -- finished
     3. test ollama update fastAPI
     4. add ollama config fastAPI
     5. add worker button -> save in config
@@ -559,5 +672,5 @@ def launch_gui(gui_port_to_use, server_config, log_file_path, models_file_path, 
     7. make add_modell button public
     8. add_user button
     9. test using VM (SCS-AI-PROXY)
-    
+
 """

@@ -1,15 +1,12 @@
-import configparser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
-from queue import Queue
 import requests
-import argparse
 from pathlib import Path
 import csv
 import datetime
-import threading
+
 
 SERVERS_CONFIG = []
 AUTHORIZED_USERS = {}
@@ -17,33 +14,10 @@ CONFIG_FILE_PATH = "config.info"
 USERS_FILE_PATH = "authorized_users.txt"
 LOG_FILE_PATH = "access_log.txt"
 csv_file = "/Users/vincent/Documents/UNI/Arbeit/Hendric/OllamaProject/models.csv"
-
-try:
-    from gui import launch_gui
-    GUI_AVAILABLE = True
-except ImportError as e:
-    print(f"Could not import GUI module: {e}. GUI will not be available.")
-    GUI_AVAILABLE = False
-    def launch_gui(port):
-        print("GUI module not found. GUI cannot be started.")
+DEACTIVATE_SECURITY = False
 
 
-def get_config(filename):
-    config = configparser.ConfigParser()
-    if not Path(filename).exists():
-        print(f"Config file {filename} not found. No servers will be loaded.")
-        return []
-    config.read(filename)
-    parsed_servers = []
-    for name in config.sections():
-        try:
-            parsed_servers.append((name, {'url': config[name]['url'], 'queue': Queue()}))
-        except KeyError:
-            print(f"Server entry '{name}' in {filename} is missing 'url'. Skipping.")
-    return parsed_servers
-
-
-def save_last_used(model):
+def _save_last_used(model):
     today = datetime.datetime.today().strftime("%d.%m.%Y")
     rows = []
     with open(csv_file, newline='') as f:
@@ -55,29 +29,9 @@ def save_last_used(model):
             rows.append(row)
 
     with open(csv_file, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(rows)
-
-
-def get_authorized_users(filename):
-    authorized_users = {}
-    user_info_list = []
-
-    if not Path(filename).exists():
-        print(f"Authorized users file {filename} not found. No users will be loaded.")
-        return authorized_users, user_info_list
-
-    with open(filename, 'r', newline='') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if not row.get("user") or not row.get("accessKey"):
-                print(f"Missing 'User' or 'Access Key' in row: {row}")
-                continue
-            authorized_users[row["user"]] = row["accessKey"]
-            user_info_list.append(row)
-
-    return authorized_users, user_info_list
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -208,7 +162,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         post_data_dict = json.loads(post_data_str)
 
                         model = post_data_dict['model']
-                        save_last_used(model)
+                        _save_last_used(model)
 
 
                         is_streaming = post_data_dict.get("stream", False)
@@ -270,70 +224,3 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     pass
-
-def start_proxy_server(port, request_handler_class):
-    """Starts the HTTP proxy server."""
-    try:
-        proxy_server = ThreadedHTTPServer(('', port), request_handler_class)
-        print(f'Running Ollama proxy server on port {port}')
-        proxy_server.serve_forever()
-    except OSError as e:
-        print(f"Could not start proxy server on port {port}: {e}")
-        print("The port might be already in use.")
-    except Exception as e:
-        print(f"An unexpected error occurred while starting the proxy server: {e}")
-
-
-def main():
-    global SERVERS_CONFIG, AUTHORIZED_USERS, CONFIG_FILE_PATH, USERS_FILE_PATH, LOG_FILE_PATH, DEACTIVATE_SECURITY
-
-    parser = argparse.ArgumentParser(description="Ollama Proxy Server with Security and Load Balancing")
-    parser.add_argument('--config', default="config.ini", help='Path to the server configuration file (default: config.ini)')
-    parser.add_argument('--log_path', default="access_log.txt", help='Path to the access log file (default: access_log.txt)')
-    parser.add_argument('--users_list', default="authorized_users.txt", help='Path to the authorized users list file (default: authorized_users.txt)')
-    parser.add_argument('--models', default="models.txt", help='Models available on all workers (default: models.txt)')
-    parser.add_argument('--port', type=int, default=8000, help='Port number for the proxy server (default: 8000)')
-    parser.add_argument('--gui_port', type=int, default=7860, help='Port number for the Gradio GUI (default: 7860)')
-    parser.add_argument('-d', '--deactivate_security', action='store_true', help='Deactivates security layer (USE WITH CAUTION)')
-    parser.add_argument('--no-gui', action='store_true', help='Do not launch the Gradio GUI')
-    args = parser.parse_args()
-
-    CONFIG_FILE_PATH = args.config
-    USERS_FILE_PATH = args.users_list
-    LOG_FILE_PATH = args.log_path
-    DEACTIVATE_SECURITY = args.deactivate_security
-    MODELS_FILE_PATH = args.models
-
-    SERVERS_CONFIG = get_config(CONFIG_FILE_PATH)
-    AUTHORIZED_USERS, _ = get_authorized_users(USERS_FILE_PATH)
-
-    print("Ollama Proxy server")
-
-    print(f"Configuration file: {CONFIG_FILE_PATH}")
-    print(f"Users list file: {USERS_FILE_PATH}")
-    print(f"Log file: {LOG_FILE_PATH}")
-
-    proxy_thread = threading.Thread(target=start_proxy_server, args=(args.port, RequestHandler), daemon=True)
-    proxy_thread.start()
-
-    if not args.no_gui and GUI_AVAILABLE:
-
-        launch_gui(args.gui_port,
-                   SERVERS_CONFIG,
-                   LOG_FILE_PATH,
-                   MODELS_FILE_PATH,
-                   USERS_FILE_PATH,
-                   get_authorized_users)
-
-    if (args.no_gui or not GUI_AVAILABLE) and proxy_thread.is_alive():
-        try:
-            while proxy_thread.is_alive():
-                proxy_thread.join(timeout=1)
-        except KeyboardInterrupt:
-            print("\nShutdown signal received. Exiting.")
-        finally:
-            print("Ollama Proxy Server shut down.")
-
-
-if __name__ == "__main__":
-    main()
