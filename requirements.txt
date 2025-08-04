@@ -1,0 +1,12 @@
+certifi==2024.7.4
+charset-normalizer==3.3.2
+configparser==6.0.1
+idna==3.7
+queues==0.6.3
+requests==2.32.0
+urllib3==2.5.0
+setuptools~=78.1.1
+gradio~=5.32.1
+ollama~=0.5.1
+fastapi~=0.115.12
+pandas~=2.2.3

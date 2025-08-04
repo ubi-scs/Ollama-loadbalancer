@@ -1,0 +1,54 @@
+time_stamp,event,user_name,ip_address,access,server,nb_queued_requests_on_server,error
+2025-06-03 15:30:01.823916,rejected,testuser:testkey,127.0.0.1,Denied,None,-1,Authentication failed
+2025-06-03 15:30:17.318956,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-06-03 15:30:17.718633,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-06-03 15:31:06.476142,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-06-03 15:31:14.179038,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-06-03 16:20:33.471605,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-06-03 16:20:40.644904,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-06-03 16:23:08.961400,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-06-03 16:23:13.398083,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-06-03 16:33:55.933503,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-06-03 16:34:02.694479,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-06-17 14:24:22.755621,gen_request,testuser,127.0.0.1,Authorized,dev,0,
+2025-06-17 14:24:25.733370,gen_done,testuser,127.0.0.1,Authorized,dev,0,
+2025-07-01 14:13:16.701575,rejected,testuser:testkey,127.0.0.1,Denied,None,-1,Authentication failed
+2025-07-29 08:40:06.621909,rejected,No token,127.0.0.1,Denied,None,-1,Authentication failed
+2025-07-29 08:40:06.624279,rejected,No token,127.0.0.1,Denied,None,-1,Authentication failed
+2025-07-29 08:40:06.715738,rejected,No token,127.0.0.1,Denied,None,-1,Authentication failed
+2025-07-29 08:40:06.718141,rejected,No token,127.0.0.1,Denied,None,-1,Authentication failed
+2025-07-29 08:40:06.928850,rejected,No token,127.0.0.1,Denied,None,-1,Authentication failed
+2025-07-29 08:40:06.935623,rejected,No token,127.0.0.1,Denied,None,-1,Authentication failed
+2025-07-29 09:34:58.216253,rejected,testuser:testkey,127.0.0.1,Denied,None,-1,Authentication failed
+2025-07-29 09:36:46.439856,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 09:36:46.473639,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 09:36:57.845626,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 09:36:59.974850,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 09:39:19.801530,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 09:39:20.161331,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:43:48.223448,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:43:50.363142,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:45:16.298685,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:45:16.299217,gen_error,testuser,127.0.0.1,Authorized,robusto,1,"string indices must be integers, not 'str'"
+2025-07-29 12:45:16.299344,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:45:57.018772,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:45:57.019400,gen_error,testuser,127.0.0.1,Authorized,robusto,1,"string indices must be integers, not 'str'"
+2025-07-29 12:45:57.019729,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:46:08.133820,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:46:08.578690,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:55:41.508069,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:55:41.508658,gen_error,testuser,127.0.0.1,Authorized,robusto,1,[Errno 2] No such file or directory: '../models.csv'
+2025-07-29 12:55:41.508775,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:56:25.737054,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:56:25.737617,gen_error,testuser,127.0.0.1,Authorized,robusto,1,[Errno 2] No such file or directory: '../models.csv'
+2025-07-29 12:56:25.737752,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:56:33.466804,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 12:56:35.563869,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 13:10:16.202621,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 13:10:18.318990,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 13:12:48.616049,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 13:12:48.981466,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 14:03:01.745103,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 14:03:11.015975,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 14:03:56.205739,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-07-29 14:03:58.854769,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
