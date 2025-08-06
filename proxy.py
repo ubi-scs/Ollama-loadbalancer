@@ -1,26 +1,43 @@
+import configparser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+from queue import Queue
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 import requests
 from pathlib import Path
 import csv
 import datetime
+import pandas as pd
+import os
 
 
-SERVERS_CONFIG = []
-AUTHORIZED_USERS = {}
-CONFIG_FILE_PATH = "config.info"
-USERS_FILE_PATH = "authorized_users.txt"
+USERS_FILE_PATH = "authorized_users.csv"
+CONFIG_FILE_PATH = "workers.csv"
 LOG_FILE_PATH = "access_log.txt"
-csv_file = "/Users/vincent/Documents/UNI/Arbeit/Hendric/OllamaProject/models.csv"
+MODELS_FILE_PATH = "models.csv"
 DEACTIVATE_SECURITY = False
 
+
+def get_user_key(user):
+    users = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), USERS_FILE_PATH)))
+    users = dict(zip(users['user'], users['accessKey']))
+    return users.get(user, None)
+
+def get_config():
+    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_FILE_PATH)))
+
+    worker_list = []
+    for _,row in workers.iterrows():
+        worker_list.append((row['name'], {'url': row['url'], 'queue': Queue()}))
+
+    return worker_list if worker_list else None
 
 def _save_last_used(model):
     today = datetime.datetime.today().strftime("%d.%m.%Y")
     rows = []
-    with open(csv_file, newline='') as f:
+    models = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), MODELS_FILE_PATH))
+    with open(models, newline='') as f:
         reader = csv.reader(f)
         header = next(reader)
         for row in reader:
@@ -28,7 +45,7 @@ def _save_last_used(model):
                 row[1] = today
             rows.append(row)
 
-    with open(csv_file, 'w', newline='') as f:
+    with open(models, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(header)
         writer.writerows(rows)
@@ -93,7 +110,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             token = auth_header.split(' ')[1]
             user, key = token.split(':', 1)
 
-            if AUTHORIZED_USERS.get(user) == key:
+            if get_user_key(user) == key:
                 self.user = user
                 return True
             else:
@@ -133,8 +150,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 print("POST request without valid Content-Length.")
                 pass
 
-
-        if not SERVERS_CONFIG:
+        server_config = get_config()
+        if not server_config:
             print("No backend servers configured. Cannot proxy request.")
             self.send_response(503)
             self.send_header('Content-type', 'application/json')
@@ -143,8 +160,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.add_access_log_entry(event='error', user=self.user, ip_address=client_ip, access="Denied", server="None", nb_queued_requests_on_server=-1, error="No backend servers")
             return
 
-        min_queued_server = SERVERS_CONFIG[0]
-        for server_entry in SERVERS_CONFIG:
+        min_queued_server = server_config[0]
+        for server_entry in server_config:
             cs = server_entry[1]
             if cs['queue'].qsize() < min_queued_server[1]['queue'].qsize():
                 min_queued_server = server_entry
@@ -163,7 +180,6 @@ class RequestHandler(BaseHTTPRequestHandler):
 
                         model = post_data_dict['model']
                         _save_last_used(model)
-
 
                         is_streaming = post_data_dict.get("stream", False)
                     except (UnicodeDecodeError, json.JSONDecodeError) as json_err:
