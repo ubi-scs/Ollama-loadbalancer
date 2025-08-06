@@ -52,3 +52,12 @@ time_stamp,event,user_name,ip_address,access,server,nb_queued_requests_on_server
 2025-07-29 14:03:11.015975,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
 2025-07-29 14:03:56.205739,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
 2025-07-29 14:03:58.854769,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-06 15:46:58.669003,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-06 15:47:03.745267,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-06 15:47:27.942939,error,testuser,127.0.0.1,Denied,None,-1,No backend servers
+2025-08-06 15:47:35.943982,error,testuser,127.0.0.1,Denied,None,-1,No backend servers
+2025-08-06 15:47:39.829984,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-06 15:47:42.568177,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-06 15:59:18.629345,error,testuser,127.0.0.1,Denied,None,-1,No backend servers
+2025-08-06 15:59:23.184220,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-06 15:59:28.125009,gen_done,testuser,127.0.0.1,Authorized,robusto,0,

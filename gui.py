@@ -123,7 +123,8 @@ def get_worker_status(worker_config_path):
                                 running_models_str,
                                 gpu_utilization_str,
                                 vram_usage_str,
-                                ollama_version])
+                                ollama_version,
+                                row['enabled']])
 
 
         if not status_data:
@@ -248,14 +249,38 @@ def add_user(users_file_path, new_user_name, new_user_expiration=None):
     users.to_csv(users_file_path, index=False, encoding='utf-8')
     return users
 
-def add_worker(workers_file_path, new_worker_name, new_worker_url):
-    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), workers_file_path)))
+def add_worker(worker_config_path, new_worker_name, new_worker_url):
+    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), worker_config_path)))
 
     new_worker = pd.DataFrame([{'name': new_worker_name, 'url': new_worker_url, 'enabled': True}])
     workers = pd.concat([workers, new_worker], ignore_index=True)
-    workers.to_csv(workers_file_path, index=False, encoding='utf-8')
+    workers.to_csv(worker_config_path, index=False, encoding='utf-8')
 
-    return get_worker_status(workers_file_path)
+    return get_worker_status(worker_config_path)
+
+def disable_worker(worker_config_path, worker_name):
+    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), worker_config_path)))
+
+    workers.loc[workers['name'] == worker_name, 'enabled'] = False
+    workers.to_csv(worker_config_path, index=False, encoding='utf-8')
+
+    return get_worker_status(worker_config_path)
+
+def enable_worker(worker_config_path, worker_name):
+    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), worker_config_path)))
+
+    workers.loc[workers['name'] == worker_name, 'enabled'] = True
+    workers.to_csv(worker_config_path, index=False, encoding='utf-8')
+
+    return get_worker_status(worker_config_path)
+
+def remove_worker(worker_config_path, worker_name):
+    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), worker_config_path)))
+
+    workers = workers[workers['name'] != worker_name]
+    workers.to_csv(worker_config_path, index=False, encoding='utf-8')
+
+    return get_worker_status(worker_config_path)
 
 def pull_missing_models(worker_status, worker_config_path):
     logs = []
@@ -338,9 +363,9 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
             """
             with gr.TabItem(label="Workers"):
                 gr.Markdown("## Configured Ollama Workers")
-                server_list = gr.DataFrame(
+                worker_status = gr.DataFrame(
                     headers=["Name", "URL", "Running Models", "GPU Usage", "GPU VRAM Usage",
-                             "Ollama Version"],
+                             "Ollama Version", "Enabled"],
                     interactive=False,
                     row_count=(10, "dynamic")
                 )
@@ -352,6 +377,11 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
                         add_worker_btn = gr.Button("Add new Worker")
                     with gr.Column(scale=1):
                         update_ollama_btn = gr.Button("Update Ollama Version")
+                        edit_worker_name = gr.Textbox(label="Change Worker", type="text")
+                        with gr.Row():
+                            disable_worker_btn = gr.Button("Disable")
+                            enable_worker_btn = gr.Button("Enable")
+                            remove_worker_btn = gr.Button("Remove")
 
                 gr.Markdown("<br><br>")
 
@@ -482,13 +512,31 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
         add_worker_btn.click(
             fn=lambda new_worker_name, new_worker_url: add_worker(worker_config_path, new_worker_name, new_worker_url),
             inputs=[new_worker_name, new_worker_url],
-            outputs=server_list
+            outputs=worker_status
+        )
+
+        disable_worker_btn.click(
+            fn= lambda edit_worker_name: disable_worker(worker_config_path, edit_worker_name),
+            inputs=[edit_worker_name],
+            outputs=worker_status
+        )
+
+        enable_worker_btn.click(
+            fn= lambda edit_worker_name: enable_worker(worker_config_path, edit_worker_name),
+            inputs=[edit_worker_name],
+            outputs=worker_status
+        )
+
+        remove_worker_btn.click(
+            fn=lambda edit_worker_name: remove_worker(worker_config_path, edit_worker_name),
+            inputs=[edit_worker_name],
+            outputs=worker_status
         )
 
         update_ollama_btn.click(
             fn=lambda: update_ollama(worker_config_path),
             inputs=None,
-            outputs=server_list
+            outputs=worker_status
         )
 
         pull_missing_btn.click(
@@ -521,7 +569,7 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
         server_status_timer.tick(
             fn=lambda: get_worker_status(worker_config_path),
             inputs=None,
-            outputs=server_list
+            outputs=worker_status
         )
 
         # read last used every 10 seconds
@@ -531,7 +579,6 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
             inputs=None,
             outputs=global_models
         )
-
 
 
         # Initial loads
@@ -546,7 +593,7 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
         demo.load(
             on_load,
             inputs=None,
-            outputs=[server_list, log_output_textbox, global_models, worker_models, users]
+            outputs=[worker_status, log_output_textbox, global_models, worker_models, users]
         )
 
     return demo
@@ -621,7 +668,7 @@ def main():
     parser.add_argument('--config', default="workers.csv", help='Path to the server configuration file (default: workers.csv)')
     parser.add_argument('--log_path', default="access_log.txt", help='Path to the access log file (default: access_log.txt)')
     parser.add_argument('--users_list', default="authorized_users.csv", help='Path to the authorized users list file (default: authorized_users.csv)')
-    parser.add_argument('--models', default="models.txt", help='Models available on all workers (default: models.txt)')
+    parser.add_argument('--models', default="models.csv", help='Models available on all workers (default: models.csv)')
     parser.add_argument('--port', type=int, default=8000, help='Port number for the proxy server (default: 8000)')
     parser.add_argument('--gui_port', type=int, default=7860, help='Port number for the Gradio GUI (default: 7860)')
     parser.add_argument('-d', '--deactivate_security', action='store_true', help='Deactivates security layer (USE WITH CAUTION)')

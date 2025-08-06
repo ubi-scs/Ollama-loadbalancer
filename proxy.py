@@ -29,7 +29,8 @@ def get_config():
 
     worker_list = []
     for _,row in workers.iterrows():
-        worker_list.append((row['name'], {'url': row['url'], 'queue': Queue()}))
+        if row['enabled']:
+            worker_list.append((row['name'], {'url': row['url'], 'queue': Queue()}))
 
     return worker_list if worker_list else None
 
