@@ -10,3 +10,4 @@ gradio~=5.32.1
 ollama~=0.5.1
 fastapi~=0.115.12
 pandas~=2.2.3
+python-dateutil~=2.9.0.post0

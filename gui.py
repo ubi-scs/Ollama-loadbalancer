@@ -1,20 +1,19 @@
 import argparse
-import configparser
+import csv
+import json
+import os
 import random
 import threading
 import time
-from tempfile import NamedTemporaryFile
 from datetime import datetime
-from dateutil.relativedelta import relativedelta
-import gradio as gr
-from pathlib import Path
-import requests
-import pandas as pd
-import json
-import os
-import csv
+from tempfile import NamedTemporaryFile
 
-from proxy import RequestHandler, ThreadedHTTPServer
+import gradio as gr
+import pandas as pd
+import requests
+from dateutil.relativedelta import relativedelta
+
+from proxy import RequestHandler, ThreadedHTTPServer, LOG_FILE_PATH
 
 CORRECT_PASSWORD = os.environ.get("ADMIN_PASSWORD")
 if not CORRECT_PASSWORD:
@@ -23,6 +22,11 @@ if not CORRECT_PASSWORD:
 OLLAMA_HELPER_API_KEY = os.environ.get("OLLAMA_HELPER_API_KEY")
 if not OLLAMA_HELPER_API_KEY:
     raise RuntimeError(f"OLLAMA_HELPER_API_KEY environment variable not set. Please provide a secret OLLAMA_HELPER_API_KEY.")
+
+
+WORKER_CONFIG_PATH = 'workers.csv'
+AUTHORIZED_USERS_CONFIG_PATH = 'authorized_users.csv'
+MODELS_CONFIG_PATH = 'models.csv'
 
 """
     ### GUI GETTER/HELPER ###
@@ -48,9 +52,9 @@ def login(password):
             gr.update(value="Incorrect password.", visible=True)
         )
 
-def get_worker_status(worker_config_path):
+def get_worker_status():
     status_data = []
-    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), worker_config_path)))
+    workers = pd.read_csv(WORKER_CONFIG_PATH)
 
     try:
         for _, row in workers.iterrows():
@@ -137,11 +141,11 @@ def get_worker_status(worker_config_path):
         traceback.print_exc()
         return [["Error processing server data.", str(e), "", ""]]
 
-def get_logs(log_file_path_str, num_lines=100):
+def get_logs(num_lines=100):
     """
     Reads the last N lines from the access log file.
     """
-    log_file_path = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), log_file_path_str))
+    log_file_path = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), LOG_FILE_PATH))
 
     try:
         with open(log_file_path, 'r', encoding='utf-8') as f:
@@ -160,18 +164,17 @@ def get_logs(log_file_path_str, num_lines=100):
         traceback.print_exc()
         return f"Error reading log file: {str(e)}"
 
-def get_global_models(models_file_path):
-    models_file_path = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), models_file_path))
-    return pd.read_csv(models_file_path)
+def get_global_models():
+    return pd.read_csv(MODELS_CONFIG_PATH)
 
-def get_worker_models(worker_config_path, models_file_path):
+def get_worker_models():
     worker_status_list = []
 
     # Step 1: get worker info
-    server_status = get_worker_status(worker_config_path)
+    server_status = get_worker_status()
 
     # Step 2: load global models
-    global_models_df = get_global_models(models_file_path)
+    global_models_df = get_global_models()
     if global_models_df is None or 'Model' not in global_models_df.columns:
         print("GUI Warning: Global models file missing or malformed.")
         return pd.DataFrame([["Global models config error", "Unable to load models"]], columns=["Worker", "Status"])
@@ -214,26 +217,21 @@ def get_worker_models(worker_config_path, models_file_path):
 
     return pd.DataFrame(worker_status_list, columns=["Worker", "Missing", "Additional"])
 
-def get_users(users_file_path):
-    users_file_path = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), users_file_path))
-    df = pd.read_csv(users_file_path)
-    return pd.DataFrame(df, columns=["user", "expirationDate", "accessKey"])
+def get_users():
+    return pd.read_csv(AUTHORIZED_USERS_CONFIG_PATH)
 
 
 """
-   ### GUI INTERACTION ###
+    ### GUI INTERACTION ###
 """
-def add_global_model(models_file_path, name):
-    models_file_path = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), models_file_path))
-
+def add_global_model(name):
     new_model = pd.DataFrame([{'Model': name, 'LastUsed': datetime.today().strftime("%d.%m.%Y")}])
-    models = pd.concat([pd.read_csv(models_file_path), new_model], ignore_index=True)
+    models = pd.concat([pd.read_csv(MODELS_CONFIG_PATH), new_model], ignore_index=True)
 
-    models.to_csv(models_file_path, index=False, encoding='utf-8')
+    models.to_csv(MODELS_CONFIG_PATH, index=False, encoding='utf-8')
     return models
 
-def add_user(users_file_path, new_user_name, new_user_expiration=None):
-    users_file_path = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), users_file_path))
+def add_user(new_user_name, new_user_expiration=None):
 
     def generate_key(length=10):
         """Generate a random key of given length"""
@@ -244,111 +242,193 @@ def add_user(users_file_path, new_user_name, new_user_expiration=None):
         new_user_expiration = (datetime.today() + relativedelta(months=6)).strftime("%d.%m.%Y")
 
     new_user = pd.DataFrame([{'user': new_user_name, 'expirationDate': new_user_expiration, 'accessKey': generate_key()}])
-    users = pd.concat([pd.read_csv(users_file_path), new_user], ignore_index=True)
+    users = pd.concat([pd.read_csv(AUTHORIZED_USERS_CONFIG_PATH), new_user], ignore_index=True)
 
-    users.to_csv(users_file_path, index=False, encoding='utf-8')
+    users.to_csv(AUTHORIZED_USERS_CONFIG_PATH, index=False, encoding='utf-8')
     return users
 
-def add_worker(worker_config_path, new_worker_name, new_worker_url):
-    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), worker_config_path)))
+def add_worker(new_worker_name, new_worker_url):
+    workers = pd.read_csv(WORKER_CONFIG_PATH)
 
     new_worker = pd.DataFrame([{'name': new_worker_name, 'url': new_worker_url, 'enabled': True}])
     workers = pd.concat([workers, new_worker], ignore_index=True)
-    workers.to_csv(worker_config_path, index=False, encoding='utf-8')
+    workers.to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
 
-    return get_worker_status(worker_config_path)
+    return get_worker_status()
 
-def disable_worker(worker_config_path, worker_name):
-    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), worker_config_path)))
-
-    workers.loc[workers['name'] == worker_name, 'enabled'] = False
-    workers.to_csv(worker_config_path, index=False, encoding='utf-8')
-
-    return get_worker_status(worker_config_path)
-
-def enable_worker(worker_config_path, worker_name):
-    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), worker_config_path)))
-
-    workers.loc[workers['name'] == worker_name, 'enabled'] = True
-    workers.to_csv(worker_config_path, index=False, encoding='utf-8')
-
-    return get_worker_status(worker_config_path)
-
-def remove_worker(worker_config_path, worker_name):
-    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), worker_config_path)))
-
-    workers = workers[workers['name'] != worker_name]
-    workers.to_csv(worker_config_path, index=False, encoding='utf-8')
-
-    return get_worker_status(worker_config_path)
-
-def pull_missing_models(worker_status, worker_config_path):
+def add_missing_models_generator(worker_status):
     logs = []
-    server_status = get_worker_status(worker_config_path)
+    server_status = get_worker_status()
 
     for worker in worker_status.itertuples(index=False):
         status = getattr(worker, "Missing")
-        if status == "None":
+        if not status or status == "None":
             continue
 
         worker_name = getattr(worker, "Worker")
         url = next((entry[1] for entry in server_status if entry[0] == worker_name), "")
 
-        logs.append([f"[Updating {worker_name}] :: {url}"])
+        if not url:
+            logs.append(f"[Skipping {worker_name}] :: URL not found")
+            yield "\n".join(logs)
+            continue
 
-        models = status.split(", ")
-        for model in models:
-            model_name = model.strip()
-            if not model_name:
-                continue
+        logs.append(f"[Updating {worker_name}]")
+        yield "\n".join(logs)
+
+        models = [model.strip() for model in status.split(',') if model.strip()]
+        for model_name in models:
+            last_reported_percent = -1
             try:
                 response = requests.post(
                     url=f"{url}/api/pull",
-                    json={"model": model_name},
-                    timeout=5
+                    json={"model": model_name, "stream": True},
+                    stream=True,
+                    timeout=300
                 )
+                response.raise_for_status()
 
-                if response.status_code == 200:
+                for line in response.iter_lines():
+                    if not line:
+                        continue
                     try:
-                        parts = response.text.strip().split("\n")
-                        for part in parts:
-                            try:
-                                data = json.loads(part)
-                                if data.get("status") == "pulling manifest":
-                                    continue
-                                elif data.get("error"):
-                                    logs.append(f"Failed to pull {model_name}: {data['error']}\n")
-                                    break
-                                elif data.get("status") == "success":
-                                    logs.append(f"{model_name} pulled successfully.")
-                                    break
-                            except json.JSONDecodeError:
-                                logs.append(f"Malformed response: {part}")
-                    except Exception as e:
-                        logs.append(f"Unexpected error while processing {model_name}: {str(e)}")
-                else:
-                    logs.append(f"Failed to pull {model_name}: {response.status_code} - {response.text}")
+                        data = json.loads(line.decode('utf-8'))
+                        log_line = ""
+                        if data.get("error"):
+                            log_line = f"  - Failed to pull {model_name}: {data['error']}"
+                        elif "pulling manifest" in data.get("status", ""):
+                            log_line = f"  - Pulling {model_name}:"
+                        elif "total" in data and "completed" in data.keys():
+                            total = data.get("total", 0)
+                            completed = data.get("completed", 0)
+                            if total > 0:
+                                percent_done = (completed / total) * 100
+                                if percent_done - last_reported_percent >= 10 or (
+                                        percent_done >= 99 and last_reported_percent < 99):
+                                    last_reported_percent = percent_done
+                                    log_line = f"  - Downloading... {percent_done:.1f}%"
+                        if log_line and logs[-1] != log_line:
+                            logs.append(log_line)
+                            yield "\n".join(logs)
+
+                        if data.get("status") == "success":
+                            logs.append(f"  + {model_name} pulled successfully to {worker_name}.")
+                            yield "\n".join(logs)
+                            break
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+
             except requests.exceptions.RequestException as e:
-                logs.append(f"Exception while pulling {model_name}: {e}")
+                logs.append(f"  - EXCEPTION for {model_name}: {e}")
+                yield "\n".join(logs)
 
-    return "\n".join(
-        line[0] if isinstance(line, list) else line
-        for line in logs
-    )
+    logs.append("\nUpdate process finished.")
+    yield "\n".join(logs)
 
-def remove_model(model, worker_config_path):
+def remove_user(user_name):
+    users = pd.read_csv(AUTHORIZED_USERS_CONFIG_PATH)
+    users = users[users['user'] != user_name]
+
+    users.to_csv(AUTHORIZED_USERS_CONFIG_PATH, index=False, encoding='utf-8')
+    return users
+
+def remove_model(model_name):
+
     logs = []
-    workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), worker_config_path)))
-    for _, row in workers:
-        worker_name = row["name"]
-        logs.append([worker_name,"NOW PURGING!!!", model])
+    server_status = get_worker_status()
 
-    return logs
 
-def update_ollama(worker_config_path):
+    logs.append(f"Removing: {model_name}")
+    yield "\n".join(logs)
+
+    for worker_name, url, *_ in server_status:
+
+        try:
+            response = requests.delete(
+                url=f"{url}/api/delete",
+                json={"name": model_name},
+                timeout=120
+            )
+
+            if response.status_code == 404:
+                logs.append(f"  - Model '{model_name}' not found on {worker_name} (already removed).")
+                yield "\n".join(logs)
+                continue
+
+            response.raise_for_status()
+            logs.append(f"  + Successfully removed '{model_name}' from {worker_name}.")
+            yield "\n".join(logs)
+
+        except requests.exceptions.RequestException as e:
+            logs.append(f"  - EXCEPTION for {worker_name}: {e}")
+            yield "\n".join(logs)
+
+    logs.append("\nRemoval process finished.")
+    yield "\n".join(logs)
+
+def remove_worker(worker_name):
+    workers = pd.read_csv(WORKER_CONFIG_PATH)
+
+    workers = workers[workers['name'] != worker_name]
+    workers.to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
+
+    return get_worker_status()
+
+def disable_worker(worker_name):
+    workers = pd.read_csv(WORKER_CONFIG_PATH)
+
+    workers.loc[workers['name'] == worker_name, 'enabled'] = False
+    workers.to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
+
+    return get_worker_status()
+
+def enable_worker(worker_name):
+    workers = pd.read_csv(WORKER_CONFIG_PATH)
+
+    workers.loc[workers['name'] == worker_name, 'enabled'] = True
+    workers.to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
+
+    return get_worker_status()
+
+def update_ollama():
     return 0
 
-def create_gui(worker_config_path, log_file_path, models_file_path, authorized_users_path):
+
+"""
+    ### GENERAL ###
+"""
+def clean_expired_users():
+    today = datetime.today().date()
+    temp_file = NamedTemporaryFile(mode='w', delete=False, newline='')
+
+    with open(AUTHORIZED_USERS_CONFIG_PATH, mode='r', newline='') as csvfile, temp_file:
+        reader = csv.DictReader(csvfile)
+        fieldnames = reader.fieldnames
+        writer = csv.DictWriter(temp_file, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in reader:
+            try:
+                exp_date = datetime.strptime(row['expirationDate'], '%d.%m.%Y').date()
+                if exp_date >= today:
+                    writer.writerow(row)
+            except ValueError as e:
+                print(f"Skipping row due to error: {e}")
+
+    os.replace(temp_file.name, AUTHORIZED_USERS_CONFIG_PATH)
+
+def start_cleanup_thread(intervall_hours=2):
+    sleep_time_seconds = intervall_hours * 60 * 60
+    def loop():
+        while True:
+            clean_expired_users()
+            time.sleep(sleep_time_seconds)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    return thread
+
+def create_gui():
     """
     Creates the Gradio interface.
     """
@@ -397,8 +477,8 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
 
                         )
 
-                        model_name = gr.Textbox(label="Model to add", type="text")
-                        add_model_btn = gr.Button("Add new Model")
+                        model_name = gr.Textbox(label="Model", type="text")
+                        add_model_btn = gr.Button("Add Model")
                         with gr.Row(visible=False) as model_management:
                             remove_model_btn = gr.Button("Remove Model")
 
@@ -421,23 +501,28 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
                             show_copy_button=True
                         )
 
+
             """
                 <----- USERS ----->
             """
             with gr.TabItem(label="Users", visible=False) as user_management:
+
+                gr.Markdown("## Registered Users")
+
+                users = gr.DataFrame(
+                    headers=["UserID", "Expiration Date"],
+                    interactive=False,
+                    row_count=(10, "dynamic")
+                )
                 with gr.Row():
                     with gr.Column(scale=1):
-                        gr.Markdown("## Registered Users")
-
-                        users = gr.DataFrame(
-                            headers=["UserID", "Expiration Date"],
-                            interactive=False,
-                            row_count=(10, "dynamic")
-                        )
                         new_user_name = gr.Textbox(label="User", type="text")
                         new_user_expiration = gr.Textbox(label="Optional: Expiration Date (Default: 6 Months)", type="text")
-                        add_user_btn = gr.Button("Add new User")
-                        gr.Markdown("(Users with past expiration dates will be removed automatically)")
+                    with gr.Column(scale=1):
+                        add_user_btn = gr.Button("Add User")
+                        remove_user_btn = gr.Button("Remove User")
+
+                gr.Markdown("(Users with past expiration dates will be removed automatically)")
 
             """
                 <----- LOGS ----->
@@ -464,7 +549,7 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
                     refresh_logs_btn = gr.Button("Refresh Logs")
 
                 def update_logs_display(lines_to_show_from_input):
-                    return get_logs(log_file_path, num_lines=int(lines_to_show_from_input))
+                    return get_logs(num_lines=int(lines_to_show_from_input))
 
 
         """
@@ -479,15 +564,6 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
 
 
         # ------> events <------
-        login_button.click(
-            fn=login,
-            inputs=password_input,
-            outputs=[
-                worker_model_management, user_management, worker_mangagement, admin_logs, admin_login_control,
-                model_management, login_status
-            ]
-        )
-
         password_input.submit(
             fn=login,
             inputs=password_input,
@@ -497,64 +573,73 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
             ]
         )
 
+        login_button.click(
+            fn=login,
+            inputs=password_input,
+            outputs=[
+                worker_model_management, user_management, worker_mangagement, admin_logs, admin_login_control,
+                model_management, login_status
+            ]
+        )
+
         add_user_btn.click(
-            fn=lambda name, expiration: add_user(authorized_users_path, name, new_user_expiration=expiration),
+            fn=lambda name, expiration: add_user(name, new_user_expiration=expiration),
             inputs=[new_user_name, new_user_expiration],
             outputs=users
         )
 
-        add_model_btn.click(
-            fn=lambda model_name: add_global_model(models_file_path, model_name),
-            inputs=[model_name],
-            outputs=global_models
+        remove_user_btn.click(
+            fn=lambda name: remove_user(name),
+            inputs=[new_user_name],
+            outputs=users
         )
 
         add_worker_btn.click(
-            fn=lambda new_worker_name, new_worker_url: add_worker(worker_config_path, new_worker_name, new_worker_url),
+            fn=lambda new_worker_name, new_worker_url: add_worker(new_worker_name, new_worker_url),
             inputs=[new_worker_name, new_worker_url],
             outputs=worker_status
         )
 
+        add_model_btn.click(
+            fn=lambda model_name: add_global_model(model_name),
+            inputs=[model_name],
+            outputs=global_models
+        )
+
         disable_worker_btn.click(
-            fn= lambda edit_worker_name: disable_worker(worker_config_path, edit_worker_name),
+            fn= lambda edit_worker_name: disable_worker(edit_worker_name),
             inputs=[edit_worker_name],
             outputs=worker_status
         )
 
         enable_worker_btn.click(
-            fn= lambda edit_worker_name: enable_worker(worker_config_path, edit_worker_name),
+            fn= lambda edit_worker_name: enable_worker(edit_worker_name),
             inputs=[edit_worker_name],
             outputs=worker_status
         )
 
         remove_worker_btn.click(
-            fn=lambda edit_worker_name: remove_worker(worker_config_path, edit_worker_name),
+            fn=lambda edit_worker_name: remove_worker(edit_worker_name),
             inputs=[edit_worker_name],
             outputs=worker_status
         )
 
         update_ollama_btn.click(
-            fn=lambda: update_ollama(worker_config_path),
+            fn=lambda: update_ollama(),
             inputs=None,
             outputs=worker_status
         )
 
         pull_missing_btn.click(
-            fn=lambda worker_status: pull_missing_models(worker_status, worker_config_path),
+            fn=add_missing_models_generator,
             inputs=[worker_models],
             outputs=update_logs
         )
 
         remove_model_btn.click(
-            fn=lambda model_to_purge: remove_model(model_name, worker_config_path),
+            fn=remove_model,
             inputs=[model_name],
             outputs=update_logs
-        )
-
-        global_models.change(
-            fn=lambda: get_worker_models(worker_config_path, models_file_path),
-            inputs=None,
-            outputs=worker_models
         )
 
         refresh_logs_btn.click(
@@ -563,31 +648,38 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
             outputs=log_output_textbox
         )
 
+        global_models.change(
+            fn=get_worker_models,
+            inputs=None,
+            outputs=worker_models
+        )
 
-        # get server utilization every 3 seconds
-        server_status_timer = gr.Timer(value=3.0)
-        server_status_timer.tick(
-            fn=lambda: get_worker_status(worker_config_path),
+        status_timer = gr.Timer(value=3.0)
+        status_timer.tick(
+            fn=get_worker_status,
             inputs=None,
             outputs=worker_status
         )
+        status_timer.tick(
+            fn=get_worker_models,
+            inputs=None,
+            outputs=worker_models
+        )
 
-        # read last used every 10 seconds
         last_used_timer = gr.Timer(value=10)
         last_used_timer.tick(
-            fn=lambda: get_global_models(models_file_path),
+            fn=get_global_models,
             inputs=None,
             outputs=global_models
         )
 
-
         # Initial loads
         def on_load():
-            server_status = get_worker_status(worker_config_path)
-            logs = get_logs(log_file_path, num_lines=default_log_lines)
-            models = get_global_models(models_file_path)
-            worker_status = get_worker_models(worker_config_path, models_file_path)
-            users = get_users(authorized_users_path)
+            server_status = get_worker_status()
+            logs = get_logs(num_lines=default_log_lines)
+            models = get_global_models()
+            worker_status = get_worker_models()
+            users = get_users()
             return server_status, logs, models, worker_status, users
 
         demo.load(
@@ -598,42 +690,7 @@ def create_gui(worker_config_path, log_file_path, models_file_path, authorized_u
 
     return demo
 
-"""
-    ### GENERAL ###
-"""
-def clean_expired_users():
-    file_path = 'authorized_users.csv'
-    today = datetime.today().date()
-    temp_file = NamedTemporaryFile(mode='w', delete=False, newline='')
-
-    with open(file_path, mode='r', newline='') as csvfile, temp_file:
-        reader = csv.DictReader(csvfile)
-        fieldnames = reader.fieldnames
-        writer = csv.DictWriter(temp_file, fieldnames=fieldnames)
-        writer.writeheader()
-
-        for row in reader:
-            try:
-                exp_date = datetime.strptime(row['expirationDate'], '%d.%m.%Y').date()
-                if exp_date >= today:
-                    writer.writerow(row)
-            except ValueError as e:
-                print(f"Skipping row due to error: {e}")
-
-    os.replace(temp_file.name, file_path)
-
-def start_cleanup_thread(intervall_hours=2):
-    sleep_time_seconds = intervall_hours * 60 * 60
-    def loop():
-        while True:
-            clean_expired_users()
-            time.sleep(sleep_time_seconds)
-
-    thread = threading.Thread(target=loop, daemon=True)
-    thread.start()
-    return thread
-
-def start_gui(gui_port_to_use, server_config, log_file_path, models_file_path, users_file_path):
+def start_gui(gui_port_to_use):
     """
     Launches the Gradio GUI.
     Passes the server config getter to create_gui.
@@ -641,7 +698,7 @@ def start_gui(gui_port_to_use, server_config, log_file_path, models_file_path, u
     launch command: python proxy.py --config ../workers.csv --users_list ../authorized_users.csv --log_path access_log.txt --port 8000 --gui_port 7860 --model ../models.txt
     """
     print("GUI: Attempting to launch Gradio GUI...")
-    gui_app = create_gui(server_config, log_file_path, models_file_path, users_file_path)
+    gui_app = create_gui()
     try:
         gui_app.launch(server_name="localhost", server_port=int(gui_port_to_use), share=False, show_api=False)
         print(f"GUI: Gradio GUI is running on http://localhost:{gui_port_to_use}")
@@ -662,7 +719,7 @@ def start_proxy_server(port, request_handler_class):
 
 
 def main():
-    global SERVERS_CONFIG, AUTHORIZED_USERS, CONFIG_FILE_PATH, USERS_FILE_PATH, LOG_FILE_PATH, DEACTIVATE_SECURITY
+    global WORKER_CONFIG_PATH, AUTHORIZED_USERS_CONFIG_PATH, MODELS_PATH
 
     parser = argparse.ArgumentParser(description="Ollama Proxy Server with Security and Load Balancing")
     parser.add_argument('--config', default="workers.csv", help='Path to the server configuration file (default: workers.csv)')
@@ -671,31 +728,25 @@ def main():
     parser.add_argument('--models', default="models.csv", help='Models available on all workers (default: models.csv)')
     parser.add_argument('--port', type=int, default=8000, help='Port number for the proxy server (default: 8000)')
     parser.add_argument('--gui_port', type=int, default=7860, help='Port number for the Gradio GUI (default: 7860)')
-    parser.add_argument('-d', '--deactivate_security', action='store_true', help='Deactivates security layer (USE WITH CAUTION)')
     args = parser.parse_args()
 
-    CONFIG_FILE_PATH = args.config
-    USERS_FILE_PATH = args.users_list
-    LOG_FILE_PATH = args.log_path
-    DEACTIVATE_SECURITY = args.deactivate_security
-    MODELS_FILE_PATH = args.models
+    WORKER_CONFIG_PATH = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), args.config))
+    AUTHORIZED_USERS_CONFIG_PATH = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), args.users_list))
+    LOG_FILE_PATH = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), args.log_path))
+    MODELS_PATH = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), args.models))
 
     print("Ollama Proxy server")
-    print(f"Configuration file: {CONFIG_FILE_PATH}")
-    print(f"Users list file: {USERS_FILE_PATH}")
+    print(f"Configuration file: {WORKER_CONFIG_PATH}")
+    print(f"Users list file: {AUTHORIZED_USERS_CONFIG_PATH}")
     print(f"Log file: {LOG_FILE_PATH}")
-    print(f"Models file: {MODELS_FILE_PATH}")
+    print(f"Models file: {MODELS_PATH}")
 
     proxy_thread = threading.Thread(target=start_proxy_server, args=(args.port, RequestHandler), daemon=True)
     proxy_thread.start()
 
     start_cleanup_thread(intervall_hours=2)
 
-    start_gui(args.gui_port,
-              CONFIG_FILE_PATH,
-              LOG_FILE_PATH,
-              MODELS_FILE_PATH,
-              USERS_FILE_PATH)
+    start_gui(args.gui_port)
 
     if proxy_thread.is_alive():
         try:
@@ -712,10 +763,6 @@ if __name__ == "__main__":
 
 """
     TODO List
-
-    1. test ollama update fastAPI
-    2. add ollama config fastAPI
-    
-    6. test using VM (SCS-AI-PROXY)
-    7. refactor all conifguration files
+    1. complete update_ollama -> fastAPI config
+    4. test using VM (SCS-AI-PROXY)
 """
