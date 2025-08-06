@@ -28,9 +28,7 @@ WORKER_CONFIG_PATH = 'workers.csv'
 AUTHORIZED_USERS_CONFIG_PATH = 'authorized_users.csv'
 MODELS_CONFIG_PATH = 'models.csv'
 
-"""
-    ### GUI GETTER/HELPER ###
-"""
+
 def login(password):
     """
     Checks the password. If correct, it returns updates to make all admin components
@@ -52,6 +50,7 @@ def login(password):
             gr.update(value="Incorrect password.", visible=True)
         )
 
+
 def get_worker_status():
     status_data = []
     workers = pd.read_csv(WORKER_CONFIG_PATH)
@@ -60,6 +59,11 @@ def get_worker_status():
         for _, row in workers.iterrows():
             worker_url = row['url']
             worker_name = row['name']
+            if not row['enabled']:
+                status_data.append([worker_name, worker_url, 'disabled', 'disabled', 'disabled', 'disabled',
+                                    row['enabled']])
+                continue
+
             running_models_str = "N/A"  # Default
             api_ps_url = f"{worker_url.rstrip('/')}/api/ps"
 
@@ -141,6 +145,7 @@ def get_worker_status():
         traceback.print_exc()
         return [["Error processing server data.", str(e), "", ""]]
 
+
 def get_logs(num_lines=100):
     """
     Reads the last N lines from the access log file.
@@ -164,8 +169,10 @@ def get_logs(num_lines=100):
         traceback.print_exc()
         return f"Error reading log file: {str(e)}"
 
+
 def get_global_models():
     return pd.read_csv(MODELS_CONFIG_PATH)
+
 
 def get_worker_models():
     worker_status_list = []
@@ -217,19 +224,18 @@ def get_worker_models():
 
     return pd.DataFrame(worker_status_list, columns=["Worker", "Missing", "Additional"])
 
+
 def get_users():
     return pd.read_csv(AUTHORIZED_USERS_CONFIG_PATH)
 
 
-"""
-    ### GUI INTERACTION ###
-"""
 def add_global_model(name):
     new_model = pd.DataFrame([{'Model': name, 'LastUsed': datetime.today().strftime("%d.%m.%Y")}])
     models = pd.concat([pd.read_csv(MODELS_CONFIG_PATH), new_model], ignore_index=True)
 
     models.to_csv(MODELS_CONFIG_PATH, index=False, encoding='utf-8')
     return models
+
 
 def add_user(new_user_name, new_user_expiration=None):
 
@@ -247,6 +253,7 @@ def add_user(new_user_name, new_user_expiration=None):
     users.to_csv(AUTHORIZED_USERS_CONFIG_PATH, index=False, encoding='utf-8')
     return users
 
+
 def add_worker(new_worker_name, new_worker_url):
     workers = pd.read_csv(WORKER_CONFIG_PATH)
 
@@ -255,6 +262,7 @@ def add_worker(new_worker_name, new_worker_url):
     workers.to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
 
     return get_worker_status()
+
 
 def add_missing_models_generator(worker_status):
     logs = []
@@ -325,12 +333,14 @@ def add_missing_models_generator(worker_status):
     logs.append("\nUpdate process finished.")
     yield "\n".join(logs)
 
+
 def remove_user(user_name):
     users = pd.read_csv(AUTHORIZED_USERS_CONFIG_PATH)
     users = users[users['user'] != user_name]
 
     users.to_csv(AUTHORIZED_USERS_CONFIG_PATH, index=False, encoding='utf-8')
     return users
+
 
 def remove_model(model_name):
 
@@ -366,6 +376,7 @@ def remove_model(model_name):
     logs.append("\nRemoval process finished.")
     yield "\n".join(logs)
 
+
 def remove_worker(worker_name):
     workers = pd.read_csv(WORKER_CONFIG_PATH)
 
@@ -373,6 +384,7 @@ def remove_worker(worker_name):
     workers.to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
 
     return get_worker_status()
+
 
 def disable_worker(worker_name):
     workers = pd.read_csv(WORKER_CONFIG_PATH)
@@ -382,6 +394,7 @@ def disable_worker(worker_name):
 
     return get_worker_status()
 
+
 def enable_worker(worker_name):
     workers = pd.read_csv(WORKER_CONFIG_PATH)
 
@@ -390,13 +403,11 @@ def enable_worker(worker_name):
 
     return get_worker_status()
 
+
 def update_ollama():
     return 0
 
 
-"""
-    ### GENERAL ###
-"""
 def clean_expired_users():
     today = datetime.today().date()
     temp_file = NamedTemporaryFile(mode='w', delete=False, newline='')
@@ -417,6 +428,7 @@ def clean_expired_users():
 
     os.replace(temp_file.name, AUTHORIZED_USERS_CONFIG_PATH)
 
+
 def start_cleanup_thread(intervall_hours=2):
     sleep_time_seconds = intervall_hours * 60 * 60
     def loop():
@@ -427,6 +439,7 @@ def start_cleanup_thread(intervall_hours=2):
     thread = threading.Thread(target=loop, daemon=True)
     thread.start()
     return thread
+
 
 def create_gui():
     """
@@ -690,6 +703,7 @@ def create_gui():
 
     return demo
 
+
 def start_gui(gui_port_to_use):
     """
     Launches the Gradio GUI.
@@ -704,6 +718,7 @@ def start_gui(gui_port_to_use):
         print(f"GUI: Gradio GUI is running on http://localhost:{gui_port_to_use}")
     except Exception as e:
         print(f"GUI Error: Failed to launch Gradio GUI: {e}")
+
 
 def start_proxy_server(port, request_handler_class):
     """Starts the HTTP proxy server."""
@@ -764,5 +779,5 @@ if __name__ == "__main__":
 """
     TODO List
     1. complete update_ollama -> fastAPI config
-    4. test using VM (SCS-AI-PROXY)
+    2¡. test using VM (SCS-AI-PROXY)
 """

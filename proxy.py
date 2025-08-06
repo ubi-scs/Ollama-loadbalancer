@@ -1,16 +1,16 @@
-import configparser
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import csv
+import datetime
 import json
+import os
+import traceback
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from queue import Queue
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
-import requests
-from pathlib import Path
-import csv
-import datetime
-import pandas as pd
-import os
 
+import pandas as pd
+import requests
 
 USERS_FILE_PATH = "authorized_users.csv"
 CONFIG_FILE_PATH = "workers.csv"
@@ -24,6 +24,7 @@ def get_user_key(user):
     users = dict(zip(users['user'], users['accessKey']))
     return users.get(user, None)
 
+
 def get_config():
     workers = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_FILE_PATH)))
 
@@ -34,6 +35,7 @@ def get_config():
 
     return worker_list if worker_list else None
 
+
 def _save_last_used(model):
     today = datetime.datetime.today().strftime("%d.%m.%Y")
     rows = []
@@ -42,7 +44,8 @@ def _save_last_used(model):
         reader = csv.reader(f)
         header = next(reader)
         for row in reader:
-            if row[0] == model:
+            print(row)
+            if len(row) == 2 and row[0] == model:
                 row[1] = today
             rows.append(row)
 
@@ -70,6 +73,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             row = {'time_stamp': str(datetime.datetime.now()), 'event':event, 'user_name': user, 'ip_address': ip_address, 'access': access, 'server': server, 'nb_queued_requests_on_server': nb_queued_requests_on_server, 'error': error}
             writer.writerow(row)
 
+
     def _send_response(self, response):
         self.send_response(response.status_code)
         for key, value in response.headers.items():
@@ -91,17 +95,21 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"Error sending response content: {e}")
 
+
     def do_HEAD(self):
         self.log_request()
         self.proxy()
+
 
     def do_GET(self):
         self.log_request()
         self.proxy()
 
+
     def do_POST(self):
         self.log_request()
         self.proxy()
+
 
     def _validate_user_and_key(self):
         try:
@@ -121,6 +129,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             print(f"Auth validation error: {e}")
             self.user = "unknown (auth_error)"
             return False
+
 
     def proxy(self):
         self.user = "unknown"
@@ -152,6 +161,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 pass
 
         server_config = get_config()
+        print(server_config)
         if not server_config:
             print("No backend servers configured. Cannot proxy request.")
             self.send_response(503)
@@ -197,6 +207,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_response(response)
             except requests.exceptions.RequestException as ex:
                 print(f"Proxy request to {min_queued_server[0]} failed: {ex}")
+                traceback.print_exc()
                 self.add_access_log_entry(event="gen_error",user=self.user, ip_address=client_ip, access="Authorized", server=min_queued_server[0], nb_queued_requests_on_server=que.qsize(),error=str(ex))
                 self.send_response(502) # Bad Gateway
                 self.send_header('Content-type', 'application/json')
@@ -204,6 +215,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "Bad Gateway: Upstream server request failed"}).encode('utf-8'))
             except Exception as ex_other: # Catch any other unexpected error
                 print(f"Unexpected error during proxy to {min_queued_server[0]}: {ex_other}")
+                traceback.print_exc()
                 self.add_access_log_entry(event="gen_error",user=self.user, ip_address=client_ip, access="Authorized", server=min_queued_server[0], nb_queued_requests_on_server=que.qsize(),error=str(ex_other))
                 self.send_response(500) # Internal Server Error
                 self.send_header('Content-type', 'application/json')
