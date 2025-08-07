@@ -160,7 +160,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 pass
 
         server_config = get_config()
-        print(server_config)
         if not server_config:
             print("No backend servers configured. Cannot proxy request.")
             self.send_response(503)

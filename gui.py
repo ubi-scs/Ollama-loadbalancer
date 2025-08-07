@@ -496,9 +496,7 @@ def create_gui():
                             show_copy_button=True
                         )
 
-
-
-                gr.Markdown("<br><br>")
+                gr.Markdown("<br>")
 
                 with gr.Row():
                     with gr.Column(scale=1):
