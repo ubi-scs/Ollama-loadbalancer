@@ -44,7 +44,6 @@ def _save_last_used(model):
         reader = csv.reader(f)
         header = next(reader)
         for row in reader:
-            print(row)
             if len(row) == 2 and row[0] == model:
                 row[1] = today
             rows.append(row)

@@ -639,3 +639,9 @@ time_stamp,event,user_name,ip_address,access,server,nb_queued_requests_on_server
 2025-08-06 20:39:04.088978,rejected,No token,127.0.0.1,Denied,None,-1,Authentication failed
 2025-08-06 20:39:04.093871,rejected,No token,127.0.0.1,Denied,None,-1,Authentication failed
 2025-08-06 20:39:04.093902,rejected,No token,127.0.0.1,Denied,None,-1,Authentication failed
+2025-08-07 09:17:30.818954,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-07 09:17:34.292362,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-07 09:19:40.399254,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-07 09:19:42.010074,gen_done,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-07 09:20:04.925861,gen_request,testuser,127.0.0.1,Authorized,robusto,0,
+2025-08-07 09:20:05.067451,gen_done,testuser,127.0.0.1,Authorized,robusto,0,

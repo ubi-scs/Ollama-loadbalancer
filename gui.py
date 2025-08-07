@@ -15,6 +15,7 @@ from dateutil.relativedelta import relativedelta
 
 from proxy import RequestHandler, ThreadedHTTPServer, LOG_FILE_PATH
 
+
 CORRECT_PASSWORD = os.environ.get("ADMIN_PASSWORD")
 if not CORRECT_PASSWORD:
     raise RuntimeError(f"ADMIN_PASSWORD environment variable not set. Please provide a secret Admin password.")
@@ -27,28 +28,6 @@ if not OLLAMA_HELPER_API_KEY:
 WORKER_CONFIG_PATH = 'workers.csv'
 AUTHORIZED_USERS_CONFIG_PATH = 'authorized_users.csv'
 MODELS_CONFIG_PATH = 'models.csv'
-
-
-def login(password):
-    """
-    Checks the password. If correct, it returns updates to make all admin components
-    visible (also hides login field+button). Otherwise, it returns an error message.
-    """
-    if password == CORRECT_PASSWORD:
-        return (
-            gr.update(visible=True),
-            gr.update(visible=True),
-            gr.update(visible=True),
-            gr.update(visible=True),
-            gr.update(visible=False),
-            gr.update(visible=True),
-            gr.update(value="Login successful! Admin controls enabled.", visible=True)
-        )
-    else:
-        return (
-            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-            gr.update(value="Incorrect password.", visible=True)
-        )
 
 
 def get_worker_status():
@@ -146,7 +125,7 @@ def get_worker_status():
         return [["Error processing server data.", str(e), "", ""]]
 
 
-def get_logs(num_lines=100):
+def get_logs(num_lines):
     """
     Reads the last N lines from the access log file.
     """
@@ -234,6 +213,7 @@ def add_global_model(name):
     models = pd.concat([pd.read_csv(MODELS_CONFIG_PATH), new_model], ignore_index=True)
 
     models.to_csv(MODELS_CONFIG_PATH, index=False, encoding='utf-8')
+
     return models
 
 
@@ -255,6 +235,10 @@ def add_user(new_user_name, new_user_expiration=None):
 
 
 def add_worker(new_worker_name, new_worker_url):
+
+    if new_worker_url == '':
+        return get_worker_status()
+
     workers = pd.read_csv(WORKER_CONFIG_PATH)
 
     new_worker = pd.DataFrame([{'name': new_worker_name, 'url': new_worker_url, 'enabled': True}])
@@ -264,7 +248,7 @@ def add_worker(new_worker_name, new_worker_url):
     return get_worker_status()
 
 
-def add_missing_models_generator(worker_status):
+def add_missing_models_generator(worker_status, models=None):
     logs = []
     server_status = get_worker_status()
 
@@ -284,7 +268,8 @@ def add_missing_models_generator(worker_status):
         logs.append(f"[Updating {worker_name}]")
         yield "\n".join(logs)
 
-        models = [model.strip() for model in status.split(',') if model.strip()]
+        if not models:
+            models = [model.strip() for model in status.split(',') if model.strip()]
         for model_name in models:
             last_reported_percent = -1
             try:
@@ -404,8 +389,35 @@ def enable_worker(worker_name):
     return get_worker_status()
 
 
-def update_ollama():
-    return 0
+def login(password):
+    """
+    Checks the password. If correct, it returns updates to make all admin components
+    visible (also hides login field+button). Otherwise, it returns an error message.
+    """
+    if password == CORRECT_PASSWORD:
+        return (
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=True),
+            gr.update(visible=False),
+            gr.update(visible=True),
+            gr.update(value="Login successful! Admin controls enabled.", visible=True)
+        )
+    else:
+        return (
+            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+            gr.update(value="Incorrect password.", visible=True)
+        )
+
+
+def update_ollama(worker_status):
+    for worker in worker_status:
+        worker_name = worker[0]
+        worker_url = worker[1]
+        worker_ollama_version = worker[5]
+        print(f"Updating {worker_name}@{worker_url} from {worker_ollama_version}")
+    return worker_status
 
 
 def clean_expired_users():
@@ -465,16 +477,26 @@ def create_gui():
                 with gr.Row(visible=False) as worker_mangagement:
                     with gr.Column(scale=1):
                         with gr.Row():
-                            new_worker_name = gr.Textbox(label="New Worker Name", type="text")
-                            new_worker_url = gr.Textbox(label="New Worker URL", type="text")
-                        add_worker_btn = gr.Button("Add new Worker")
-                    with gr.Column(scale=1):
-                        update_ollama_btn = gr.Button("Update Ollama Version")
-                        edit_worker_name = gr.Textbox(label="Change Worker", type="text")
+                            new_worker_name = gr.Textbox(label="Worker Name", type="text")
+                            new_worker_url = gr.Textbox(label="Worker URL", type="text")
                         with gr.Row():
-                            disable_worker_btn = gr.Button("Disable")
-                            enable_worker_btn = gr.Button("Enable")
-                            remove_worker_btn = gr.Button("Remove")
+                            with gr.Column(scale=1):
+                                add_worker_btn = gr.Button("Add Worker")
+                                remove_worker_btn = gr.Button("Remove Worker")
+                            with gr.Column(scale=1):
+                                enable_worker_btn = gr.Button("Enable")
+                                disable_worker_btn = gr.Button("Disable")
+                        update_ollama_btn = gr.Button("Update Ollama Version")
+                    with gr.Column(scale=1):
+                        ollama_update_log = gr.Textbox(
+                            label="Ollama Update Log",
+                            lines=10,
+                            max_lines=10,
+                            interactive=False,
+                            show_copy_button=True
+                        )
+
+
 
                 gr.Markdown("<br><br>")
 
@@ -534,8 +556,6 @@ def create_gui():
                     with gr.Column(scale=1):
                         add_user_btn = gr.Button("Add User")
                         remove_user_btn = gr.Button("Remove User")
-
-                gr.Markdown("(Users with past expiration dates will be removed automatically)")
 
             """
                 <----- LOGS ----->
@@ -621,25 +641,25 @@ def create_gui():
 
         disable_worker_btn.click(
             fn= lambda edit_worker_name: disable_worker(edit_worker_name),
-            inputs=[edit_worker_name],
+            inputs=[new_worker_name],
             outputs=worker_status
         )
 
         enable_worker_btn.click(
             fn= lambda edit_worker_name: enable_worker(edit_worker_name),
-            inputs=[edit_worker_name],
+            inputs=[new_worker_name],
             outputs=worker_status
         )
 
         remove_worker_btn.click(
             fn=lambda edit_worker_name: remove_worker(edit_worker_name),
-            inputs=[edit_worker_name],
+            inputs=[new_worker_name],
             outputs=worker_status
         )
 
         update_ollama_btn.click(
-            fn=lambda: update_ollama(),
-            inputs=None,
+            fn=update_ollama,
+            inputs=[worker_status],
             outputs=worker_status
         )
 
@@ -678,9 +698,7 @@ def create_gui():
             inputs=None,
             outputs=worker_models
         )
-
-        last_used_timer = gr.Timer(value=10)
-        last_used_timer.tick(
+        status_timer.tick(
             fn=get_global_models,
             inputs=None,
             outputs=global_models
