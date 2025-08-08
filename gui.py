@@ -208,12 +208,68 @@ def get_users():
     return pd.read_csv(AUTHORIZED_USERS_CONFIG_PATH)
 
 
-def add_global_model(name):
-    new_model = pd.DataFrame([{'Model': name, 'LastUsed': datetime.today().strftime("%d.%m.%Y")}])
+def add_global_model(model_name):
+
+    worker_status = get_worker_status()
+    for worker in worker_status:
+
+        worker_name = worker[0]
+        url = worker[1]
+
+        if not url:
+            continue
+
+        gr.Info(f"Trying to add model {model_name} to {worker_name}")
+
+        last_reported_percent = -1
+        try:
+            response = requests.post(
+                url=f"{url}/api/pull",
+                json={"model": model_name, "stream": True},
+                stream=True,
+                timeout=300
+            )
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line.decode('utf-8'))
+
+                    if data.get("error"):
+                        gr.Warning(f"  - Failed to pull {model_name}: {data['error']}")
+
+                    elif "pulling manifest" in data.get("status", ""):
+                        gr.Info(f"  - Pulling {model_name}")
+                    elif "total" in data and "completed" in data.keys():
+                        total = data.get("total", 0)
+                        completed = data.get("completed", 0)
+                        if total > 0:
+                            percent_done = (completed / total) * 100
+                            if percent_done - last_reported_percent >= 25 or (
+                                    percent_done >= 99 and last_reported_percent < 99):
+                                last_reported_percent = percent_done
+                                gr.Info(f"  - Downloading... {percent_done:.1f}%")
+
+                    if data.get("status") == "success":
+
+                        gr.Info(f"  + {model_name} pulled successfully to {worker_name}.")
+
+
+                        break
+                except (json.JSONDecodeError, KeyError):
+                    continue
+
+        except requests.exceptions.RequestException as e:
+            gr.Info(f"  - EXCEPTION for {model_name}: {e}")
+
+    gr.Info("Update process finished.")
+
+    new_model = pd.DataFrame([{'Model': model_name, 'LastUsed': datetime.today().strftime("%d.%m.%Y")}])
     models = pd.concat([pd.read_csv(MODELS_CONFIG_PATH), new_model], ignore_index=True)
 
     models.to_csv(MODELS_CONFIG_PATH, index=False, encoding='utf-8')
-
     return models
 
 
@@ -248,11 +304,12 @@ def add_worker(new_worker_name, new_worker_url):
     return get_worker_status()
 
 
-def add_missing_models_generator(worker_status, models=None):
+def add_missing_models_generator():
     logs = []
     server_status = get_worker_status()
+    worker_models = get_worker_models()
 
-    for worker in worker_status.itertuples(index=False):
+    for worker in worker_models.itertuples(index=False):
         status = getattr(worker, "Missing")
         if not status or status == "None":
             continue
@@ -268,8 +325,8 @@ def add_missing_models_generator(worker_status, models=None):
         logs.append(f"[Updating {worker_name}]")
         yield "\n".join(logs)
 
-        if not models:
-            models = [model.strip() for model in status.split(',') if model.strip()]
+        models = [model.strip() for model in status.split(',') if model.strip()]
+
         for model_name in models:
             last_reported_percent = -1
             try:
@@ -328,6 +385,10 @@ def remove_user(user_name):
 
 
 def remove_model(model_name):
+    models = pd.read_csv(MODELS_CONFIG_PATH)
+
+    models = models[models['Model'] != model_name]
+    models.to_csv(MODELS_CONFIG_PATH, index=False, encoding='utf-8')
 
     logs = []
     server_status = get_worker_status()
@@ -412,6 +473,7 @@ def login(password):
 
 
 def update_ollama(worker_status):
+    gr.Info("Test!!!!!!!!")
     for worker in worker_status:
         worker_name = worker[0]
         worker_url = worker[1]
@@ -663,7 +725,7 @@ def create_gui():
 
         pull_missing_btn.click(
             fn=add_missing_models_generator,
-            inputs=[worker_models],
+            inputs=None,
             outputs=update_logs
         )
 
