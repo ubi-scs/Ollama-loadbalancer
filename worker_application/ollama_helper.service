@@ -11,7 +11,7 @@ Group=root
 WorkingDirectory=/opt/ollama-load-balancer-interface/worker_application
 
 # Use Python inside the venv environment
-ExecStart=/opt/ollama-load-balancer-interface/worker_application/venv/bin/python -m uvicorn main:app
+ExecStart=/opt/ollama-load-balancer-interface/worker_application/venv/bin/python /opt/ollama-load-balancer-interface/worker_application/main.py
 
 # Optionally load environment variables from a file
 EnvironmentFile=/opt/ollama-load-balancer-interface/worker_application/ollama-helper.env
