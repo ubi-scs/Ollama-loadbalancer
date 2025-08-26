@@ -33,6 +33,7 @@ MODELS_CONFIG_PATH = 'models.csv'
 
 def get_worker_status():
     status_data = []
+    get_worker_models()  # Ensure models file exists
     workers = pd.read_csv(WORKER_CONFIG_PATH)
 
     try:
