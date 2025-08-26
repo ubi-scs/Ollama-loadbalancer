@@ -212,6 +212,10 @@ def get_worker_models():
 
 
 def get_users():
+    #create if not exists. Structure: user,expirationDate,accessKey
+    if not os.path.exists(AUTHORIZED_USERS_CONFIG_PATH):
+        print("GUI Warning: Authorized users config file not found. Creating new file.")
+        pd.DataFrame(columns=['user', 'expirationDate', 'accessKey']).to_csv(AUTHORIZED_USERS_CONFIG_PATH, index=False, encoding='utf-8')
     return pd.read_csv(AUTHORIZED_USERS_CONFIG_PATH)
 
 
@@ -540,6 +544,7 @@ def update_ollama(worker_status):
 def clean_expired_users():
     today = datetime.today().date()
     temp_file = NamedTemporaryFile(mode='w', delete=False, newline='')
+    get_users()  # Ensure the file exists
 
     with open(AUTHORIZED_USERS_CONFIG_PATH, mode='r', newline='') as csvfile, temp_file:
         reader = csv.DictReader(csvfile)
@@ -661,7 +666,7 @@ def create_gui():
 
                 users = gr.DataFrame(
                     headers=["UserID", "Expiration Date"],
-                    interactive=False,
+                    interactive=True,
                     row_count=(10, "dynamic")
                 )
                 with gr.Row():
