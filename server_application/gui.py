@@ -133,6 +133,8 @@ def get_logs(num_lines):
     log_file_path = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), LOG_FILE_PATH))
 
     try:
+        if not os.path.exists(log_file_path):
+            return "Log file not found."
         with open(log_file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
 
@@ -151,6 +153,10 @@ def get_logs(num_lines):
 
 
 def get_global_models():
+    #should look like this: Model,LastUsed
+    if not os.path.exists(MODELS_CONFIG_PATH):
+        print("GUI Warning: Models config file not found. Creating new file.")
+        pd.DataFrame(columns=['Model', 'LastUsed']).to_csv(MODELS_CONFIG_PATH, index=False, encoding='utf-8')
     return pd.read_csv(MODELS_CONFIG_PATH)
 
 
@@ -221,6 +227,15 @@ def add_global_model(model_name):
             continue
 
         gr.Info(f"Trying to add model {model_name} to {worker_name}")
+
+        #if model name contains :latest, show warning and skip
+        if ":latest" in model_name:
+            gr.Warning(f"  - Skipping {model_name} on {worker_name}: 'latest' tag not allowed. Please specify actual size so that we can manage model sizes properly.")
+            continue
+        #same if size is not specified ie does not contain : with a number and b at the end
+        if not re.search(r":\d+[mb]$", model_name):
+            gr.Warning(f"  - Skipping {model_name} on {worker_name}: Please specify model size in billions, e.g. modelname:4b")
+            continue
 
         last_reported_percent = -1
         try:
@@ -479,16 +494,22 @@ def update_ollama(worker_status):
     Uses port 18034 for the worker application.
     """
     logs = []
-    for worker in worker_status:
+    #worker_status is a dataframe
+    for worker in worker_status.itertuples(index=False):
         worker_name = worker[0]
         worker_url = worker[1]
         enabled = worker[-1]
         if not enabled or str(enabled).lower() == "false":
             logs.append(f"[{worker_name}] Skipped (disabled)")
             continue
+
+        # Validate URL scheme
+        if not isinstance(worker_url, str) or not re.match(r'^https?://', worker_url):
+            logs.append(f"[{worker_name}] Skipped: Invalid URL '{worker_url}' (no scheme supplied)")
+            continue
+
         try:
             # Ensure the worker_url uses port 18034
-            # Replace port if present, otherwise append :18034
             if "://" in worker_url:
                 proto, rest = worker_url.split("://", 1)
                 if ":" in rest:
