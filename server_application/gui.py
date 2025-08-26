@@ -34,10 +34,7 @@ MODELS_CONFIG_PATH = 'models.csv'
 def get_worker_status():
     status_data = []
 
-    if not os.path.exists(WORKER_CONFIG_PATH):
-        print("GUI Warning: Workers config file not found. Creating new file.")
-        pd.DataFrame(columns=['name', 'url', 'enabled']).to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
-        return [["No workers configured.", "", "", ""]]
+
     workers = pd.read_csv(WORKER_CONFIG_PATH)
 
     try:
@@ -887,7 +884,10 @@ def main():
     parser.add_argument('--port', type=int, default=11434, help='Port number for the proxy server (default: 8000)')
     parser.add_argument('--gui_port', type=int, default=7860, help='Port number for the Gradio GUI (default: 7860)')
     args = parser.parse_args()
-
+    if not os.path.exists(WORKER_CONFIG_PATH):
+        print("GUI Warning: Workers config file not found. Creating new file.")
+        pd.DataFrame(columns=['name', 'url', 'enabled']).to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
+        return [["No workers configured.", "", "", ""]]
     WORKER_CONFIG_PATH = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), args.config))
     AUTHORIZED_USERS_CONFIG_PATH = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), args.users_list))
     LOG_FILE_PATH = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), args.log_path))
