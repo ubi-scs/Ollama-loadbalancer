@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 API_KEY_NAME = "OLLAMA_HELPER_API_KEY"
 API_KEY = os.getenv(API_KEY_NAME)
 
+HOST = os.getenv("WORKER_HOST", "0.0.0.0")
+PORT = int(os.getenv("WORKER_PORT", "8000"))
+
 if not API_KEY:
     raise RuntimeError(f"{API_KEY_NAME} environment variable not set. Please provide a secret API Key.")
 
@@ -182,3 +185,8 @@ def update_ollama(background_tasks: BackgroundTasks):
     logger.info("Received request to update Ollama. Scheduling background task.")
     background_tasks.add_task(_run_ollama_update)
     return {"message": "Ollama update process has been started in the background."}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host=HOST, port=PORT)
