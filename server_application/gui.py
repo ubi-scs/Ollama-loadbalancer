@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import random
+import re
 import threading
 import time
 from datetime import datetime
@@ -67,7 +68,7 @@ def get_worker_status():
                 print(f"GUI: Error fetching /api/ps for server {worker_name}: {e_ps}")
 
             try:
-                gpu_util_url = f"{worker_url.replace('11434','8000')}/gpu/utilization"
+                gpu_util_url = f"{worker_url.replace('11434','18034')}/gpu/utilization"
                 response = requests.get(gpu_util_url, headers={"x-api-key": OLLAMA_HELPER_API_KEY}, timeout=5)
                 if response.status_code == 200:
                     util_data = response.json()
@@ -80,7 +81,7 @@ def get_worker_status():
 
                 # Fetch VRAM usage
             try:
-                vram_url = f"{worker_url.replace('11434','8000')}/gpu/vram"
+                vram_url = f"{worker_url.replace('11434','18034')}/gpu/vram"
                 response = requests.get(vram_url, headers={"x-api-key": OLLAMA_HELPER_API_KEY}, timeout=5)
                 if response.status_code == 200:
                     vram_data = response.json()
@@ -473,13 +474,46 @@ def login(password):
 
 
 def update_ollama(worker_status):
-    gr.Info("Test!!!!!!!!")
+    """
+    Calls the /ollama/update endpoint on each enabled worker and displays results.
+    Uses port 18034 for the worker application.
+    """
+    logs = []
     for worker in worker_status:
         worker_name = worker[0]
         worker_url = worker[1]
-        worker_ollama_version = worker[5]
-        print(f"Updating {worker_name}@{worker_url} from {worker_ollama_version}")
-    return worker_status
+        enabled = worker[-1]
+        if not enabled or str(enabled).lower() == "false":
+            logs.append(f"[{worker_name}] Skipped (disabled)")
+            continue
+        try:
+            # Ensure the worker_url uses port 18034
+            # Replace port if present, otherwise append :18034
+            if "://" in worker_url:
+                proto, rest = worker_url.split("://", 1)
+                if ":" in rest:
+                    host, *path = rest.split("/", 1)
+                    host = re.sub(r":\d+", ":18034", host)
+                    new_url = f"{proto}://{host}"
+                    if path:
+                        new_url += "/" + path[0]
+                else:
+                    new_url = f"{proto}://{rest}:18034"
+            else:
+                new_url = worker_url
+
+            update_url = f"{new_url.rstrip('/')}/ollama/update"
+            response = requests.post(update_url, headers={"x-api-key": OLLAMA_HELPER_API_KEY}, timeout=10)
+            if response.status_code == 202:
+                msg = response.json().get("message", "Update started.")
+                logs.append(f"[{worker_name}] Update triggered: {msg}")
+            else:
+                logs.append(f"[{worker_name}] Error: HTTP {response.status_code} - {response.text}")
+        except Exception as e:
+            logs.append(f"[{worker_name}] Exception: {e}")
+    gr.Info("\n".join(logs))
+    # Optionally, refresh worker status after update
+    return get_worker_status()
 
 
 def clean_expired_users():
