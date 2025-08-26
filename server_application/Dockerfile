@@ -17,7 +17,7 @@ COPY requirements_dev.txt .
 RUN pip3 install -r requirements.txt
 
 # Copy everything from local directory to working directory in the container
-COPY . .
+COPY .. .
 
 # Do not buffer output, e.g. logs to stdout
 ENV PYTHONUNBUFFERED=1
