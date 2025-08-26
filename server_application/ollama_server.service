@@ -11,7 +11,7 @@ Group=root
 WorkingDirectory=/home/scsadmin/ollama-load-balancer-interface/server_application
 
 # Use Python inside the venv environment
-ExecStart=/home/scsadmin/ollama-load-balancer-interface/server_application/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 18034
+ExecStart=/home/scsadmin/ollama-load-balancer-interface/server_application/venv/bin/python /home/scsadmin/ollama-load-balancer-interface/server_application/gui.py
 
 # Optionally load environment variables from a file
 EnvironmentFile=/home/scsadmin/ollama-load-balancer-interface/server_application/ollama_server.env
