@@ -39,7 +39,7 @@ app = FastAPI(
 )
 
 
-def run_command(command: list[str]) -> tuple[int, str, str]:
+def run_command(command):
     """Runs a shell command and returns status code, stdout, and stderr."""
     try:
         process = subprocess.run(

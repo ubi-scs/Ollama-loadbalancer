@@ -14,7 +14,7 @@ WorkingDirectory=/opt/ollama-load-balancer-interface/worker_application
 ExecStart=/opt/ollama-load-balancer-interface/worker_application/venv/bin/python /opt/ollama-load-balancer-interface/worker_application/main.py
 
 # Optionally load environment variables from a file
-EnvironmentFile=/opt/ollama-load-balancer-interface/worker_application/ollama-helper.env
+EnvironmentFile=/opt/ollama-load-balancer-interface/worker_application/ollama_worker.env
 
 # Restart policy
 Restart=always

@@ -874,7 +874,7 @@ def main():
     parser.add_argument('--log_path', default="access_log.txt", help='Path to the access log file (default: access_log.txt)')
     parser.add_argument('--users_list', default="authorized_users.csv", help='Path to the authorized users list file (default: authorized_users.csv)')
     parser.add_argument('--models', default="models.csv", help='Models available on all workers (default: models.csv)')
-    parser.add_argument('--port', type=int, default=8000, help='Port number for the proxy server (default: 8000)')
+    parser.add_argument('--port', type=int, default=11434, help='Port number for the proxy server (default: 8000)')
     parser.add_argument('--gui_port', type=int, default=7860, help='Port number for the Gradio GUI (default: 7860)')
     args = parser.parse_args()
 
