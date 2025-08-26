@@ -34,6 +34,10 @@ MODELS_CONFIG_PATH = 'models.csv'
 def get_worker_status():
     status_data = []
 
+    if not os.path.exists(WORKER_CONFIG_PATH):
+        print("GUI Warning: Workers config file not found. Creating new file.")
+        pd.DataFrame(columns=['name', 'url', 'enabled']).to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
+        return [["No workers configured.", "", "", ""]]
     workers = pd.read_csv(WORKER_CONFIG_PATH)
 
     try:
