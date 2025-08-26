@@ -888,9 +888,9 @@ def main():
     AUTHORIZED_USERS_CONFIG_PATH = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), args.users_list))
     LOG_FILE_PATH = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), args.log_path))
     MODELS_PATH = str(os.path.join(os.path.dirname(os.path.abspath(__file__)), args.models))
-    get_worker_models()
     get_users()
     get_global_models()
+    get_logs(1)
 
     print("Ollama Proxy server")
     print(f"Configuration file: {WORKER_CONFIG_PATH}")
