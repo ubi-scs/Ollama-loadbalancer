@@ -1,13 +1,17 @@
 ## Ollama Proxy Server
 
+Install the ollama helper worker in each node where ollama is installed.
 ```bash
 cd /opt/
 sudo git clone https://git@gitlab.ub.uni-bielefeld.de/scs/enrico/ollama-load-balancer-interface.git
 cd ollama-load-balancer-interface/worker_application
 sudo chmod +x setup_environment.sh
-sudo apt install python3.8-venv
+sudo apt install python3.*-venv
 sudo ./setup_environment.sh
-cp ollama_helper.service /etc/systemd/system/
+sudo cp ollama_helper.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable ollama_helper.service
+sudo systemctl start ollama_helper.service
 ```
 
 See you space cowboy!

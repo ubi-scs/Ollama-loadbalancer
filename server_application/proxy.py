@@ -113,9 +113,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _validate_user_and_key(self):
         try:
             auth_header = self.headers.get('Authorization')
-            if not auth_header or not auth_header.startswith('Bearer '):
+            if not auth_header:
                 return False
-            token = auth_header.split(' ')[1]
+            token = auth_header
             user, key = token.split(':', 1)
 
             if get_user_key(user) == key:
@@ -137,8 +137,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             print(f'User is not authorized from {client_ip}:{client_port}')
             auth_header = self.headers.get('Authorization')
             token_info = "No token"
-            if auth_header and auth_header.startswith('Bearer '):
-                token_info = auth_header.split(' ')[1]
+            if auth_header:
+                token_info = auth_header
             self.add_access_log_entry(event='rejected', user=token_info, ip_address=client_ip, access="Denied", server="None", nb_queued_requests_on_server=-1, error="Authentication failed")
             self.send_response(403)
             self.send_header('Content-type', 'application/json')
