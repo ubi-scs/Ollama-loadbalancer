@@ -291,9 +291,9 @@ def add_global_model(model_name):
 
 def add_user(new_user_name, new_user_expiration=None):
 
-    def generate_key(length=10):
+    def generate_key(length=20):
         """Generate a random key of given length"""
-        chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}|;,.<>?/~'
+        chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
         return ''.join(random.choice(chars) for _ in range(length))
 
     if not new_user_expiration:
