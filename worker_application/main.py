@@ -1,6 +1,7 @@
 import subprocess
 import logging
 import os
+import re
 from fastapi import FastAPI, HTTPException, BackgroundTasks, status, Header, Depends
 
 logging.basicConfig(level=logging.INFO)
@@ -108,6 +109,40 @@ def restart_ollama():
     return {"message": "Ollama service is restarting."}
 
 
+def patch_ollama_service():
+    """
+    Adds required Environment lines to the ollama.service systemd unit file.
+    """
+    service_path = "/etc/systemd/system/ollama.service"
+    env_lines = [
+        'Environment="OLLAMA_HOST=0.0.0.0"\n',
+        'Environment="OLLAMA_FLASH_ATTENTION=1"\n',
+        'Environment="OLLAMA_NOHISTORY=1"\n'
+    ]
+    try:
+        with open(service_path, "r") as f:
+            lines = f.readlines()
+        last_env_idx = None
+        for idx, line in enumerate(lines):
+            if line.strip().startswith("Environment="):
+                last_env_idx = idx
+
+        # Insert after the last Environment= line
+        if last_env_idx is not None:
+            insert_idx = last_env_idx + 1
+
+            # Avoid duplicate insertion
+            already_present = any(env_lines[0].strip() in l for l in lines)
+            if not already_present:
+                lines[insert_idx:insert_idx] = env_lines
+                with open(service_path, "w") as f:
+                    f.writelines(lines)
+                # Reload systemd daemon to pick up changes
+                subprocess.run(["sudo", "systemctl", "daemon-reload"], check=False)
+    except Exception as e:
+        logger.error(f"Failed to patch ollama.service: {e}")
+
+
 def _run_ollama_update():
     """The actual update logic to be run in the background."""
     logger.info("Starting Ollama update in the background...")
@@ -130,6 +165,10 @@ def _run_ollama_update():
         logger.error(f"Ollama update failed. Stdout: {out}, Stderr: {err}")
     else:
         logger.info(f"Ollama update script finished successfully. Stdout: {out}")
+
+    # Patch the systemd service file
+    logger.info("Patching ollama.service with required Environment variables.")
+    patch_ollama_service()
 
     logger.info("Restarting Ollama service post-update.")
     run_command(["sudo", "systemctl", "restart", "ollama.service"])

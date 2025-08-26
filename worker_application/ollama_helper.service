@@ -1,0 +1,28 @@
+[Unit]
+Description=Ollama Helper FastAPI Service
+After=network.target
+
+[Service]
+# Run as root
+User=root
+Group=root
+
+# Project directory
+WorkingDirectory=/opt/ollama-helper
+
+# Use Python inside the venv environment
+ExecStart=/opt/ollama-helper/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 18034
+
+# Optionally load environment variables from a file
+EnvironmentFile=/etc/ollama-helper.env
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

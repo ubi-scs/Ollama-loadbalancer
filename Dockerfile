@@ -2,27 +2,26 @@ FROM python:3.11
 
 # Update packagtes, install necessary tools into the base image, clean up and clone git repository
 RUN apt update \
-    && apt install -y --no-install-recommends --no-install-suggests git apache2 \
+    && apt install -y --no-install-recommends --no-install-suggests git \
     && apt autoremove -y --purge \
     && apt clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
-    && git clone https://github.com/ParisNeo/ollama_proxy_server.git
 
 # Change working directory to cloned git repository
 WORKDIR ollama_proxy_server
 
+COPY requirements.txt .
+COPY requirements_dev.txt .
+
 # Install all needed requirements
-RUN pip3 install -e .
+RUN pip3 install -r requirements.txt
 
-# Copy workers.csv and authorized_users.csv into project working directory
-COPY workers.csv .
-COPY authorized_users.csv .
-
-# Start the proxy server as entrypoint
-ENTRYPOINT ["ollama_proxy_server"]
+# Copy everything from local directory to working directory in the container
+COPY . .
 
 # Do not buffer output, e.g. logs to stdout
 ENV PYTHONUNBUFFERED=1
+ENV ADMIN_PASSWORD="asdf1234"
+ENV OLLAMA_HELPER_API_KEY="1234asdf"
 
-# Set command line parameters
-CMD ["--config", "./config.ini", "--users_list", "./authorized_users.txt", "--port", "8080"]
+RUN python3 gui.py

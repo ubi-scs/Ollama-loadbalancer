@@ -789,10 +789,10 @@ def start_gui(gui_port_to_use):
 
     launch command: python proxy.py --config ../workers.csv --users_list ../authorized_users.csv --log_path access_log.txt --port 8000 --gui_port 7860 --model ../models.txt
     """
-    print("GUI: Attempting to launch Gradio GUI...")
+    print(f"GUI: Attempting to launch Gradio GUI on port {gui_port_to_use}...")
     gui_app = create_gui()
     try:
-        gui_app.launch(server_name="localhost", server_port=int(gui_port_to_use), share=False, show_api=False)
+        gui_app.launch(server_name="0.0.0.0", server_port=int(gui_port_to_use), share=False, show_api=False)
         print(f"GUI: Gradio GUI is running on http://localhost:{gui_port_to_use}")
     except Exception as e:
         print(f"GUI Error: Failed to launch Gradio GUI: {e}")
