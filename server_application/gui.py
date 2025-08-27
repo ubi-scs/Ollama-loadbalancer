@@ -223,6 +223,15 @@ def get_users():
 
 def add_global_model(model_name):
 
+    # if model name contains :latest, show warning and skip
+    if ":latest" in model_name:
+        gr.Warning(f"  - Skipping {model_name}: 'latest' tag not allowed. Please specify actual size so that we can manage model sizes properly.")
+        return pd.read_csv(MODELS_CONFIG_PATH)
+    # same if size is not specified ie does not contain : with a number and b at the end
+    if not re.search(r":\d+[mb]$", model_name):
+        gr.Warning(f"  - Skipping {model_name}: Please specify model size in billions, e.g. modelname:4b")
+        return pd.read_csv(MODELS_CONFIG_PATH)
+
     worker_status = get_worker_status()
     for worker in worker_status:
 
@@ -234,14 +243,8 @@ def add_global_model(model_name):
 
         gr.Info(f"Trying to add model {model_name} to {worker_name}")
 
-        #if model name contains :latest, show warning and skip
-        if ":latest" in model_name:
-            gr.Warning(f"  - Skipping {model_name} on {worker_name}: 'latest' tag not allowed. Please specify actual size so that we can manage model sizes properly.")
-            continue
-        #same if size is not specified ie does not contain : with a number and b at the end
-        if not re.search(r":\d+[mb]$", model_name):
-            gr.Warning(f"  - Skipping {model_name} on {worker_name}: Please specify model size in billions, e.g. modelname:4b")
-            continue
+
+
 
         last_reported_percent = -1
         try:
