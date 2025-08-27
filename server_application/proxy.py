@@ -19,6 +19,25 @@ MODELS_FILE_PATH = "models.csv"
 DEACTIVATE_SECURITY = False
 
 
+
+#ollama api endpoints:
+# POST /api/generate
+# POST /api/chat
+# POST /api/embed
+# POST /api/embeddings (deprecated in favor of /api/embed)
+# POST /api/pull
+# POST /api/push
+# POST /api/create
+# POST /api/blobs/{digest}
+# GET /api/tags
+# DELETE /api/delete
+# POST /api/copy
+# POST /api/show
+# GET /api/ps
+
+# Still needs better server choice if multiple servers have same queue length or model does not fit on one specific server.
+
+
 def get_user_key(user):
     users = pd.read_csv(str(os.path.join(os.path.dirname(os.path.abspath(__file__)), USERS_FILE_PATH)))
     users = dict(zip(users['user'], users['accessKey']))
@@ -175,7 +194,41 @@ class RequestHandler(BaseHTTPRequestHandler):
             if cs['queue'].qsize() < min_queued_server[1]['queue'].qsize():
                 min_queued_server = server_entry
 
-        if path == '/api/generate' or path == '/api/chat' or path == '/v1/chat/completions':
+        # Allow all GET requests to be proxied
+        if self.command == "GET":
+            try:
+                response = requests.request(
+                    self.command,
+                    min_queued_server[1]['url'] + path,
+                    params=get_params,
+                    headers={k: v for k, v in self.headers.items() if k.lower() not in ['host', 'connection', 'content-length']}
+                )
+                self._send_response(response)
+            except requests.exceptions.RequestException as ex:
+                print(f"Proxy GET request to {min_queued_server[0]} failed: {ex}")
+                self.send_response(502)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Bad Gateway: Upstream server request failed"}).encode('utf-8'))
+            except Exception as ex_other:
+                print(f"Unexpected error during proxy GET to {min_queued_server[0]}: {ex_other}")
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Internal Server Error"}).encode('utf-8'))
+            return
+
+        # Only allow certain POST endpoints
+        allowed_post_paths = [
+            '/api/generate',
+            '/api/chat',
+            '/api/embed',
+            '/api/embeddings',
+            '/api/show',
+            '/v1/chat/completions'
+        ]
+
+        if self.command == "POST" and path in allowed_post_paths:
             que = min_queued_server[1]['queue']
             self.add_access_log_entry(event="gen_request", user=self.user, ip_address=client_ip, access="Authorized", server=min_queued_server[0], nb_queued_requests_on_server=que.qsize())
             que.put_nowait(1)
@@ -186,10 +239,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                     try:
                         post_data_str = post_data.decode('utf-8')
                         post_data_dict = json.loads(post_data_str)
-
-                        model = post_data_dict['model']
-                        _save_last_used(model)
-
+                        model = post_data_dict.get('model')
+                        if model:
+                            _save_last_used(model)
                         is_streaming = post_data_dict.get("stream", False)
                     except (UnicodeDecodeError, json.JSONDecodeError) as json_err:
                         print(f"Could not parse POST data as JSON for {path}: {json_err}")
@@ -225,28 +277,49 @@ class RequestHandler(BaseHTTPRequestHandler):
                 else:
                     print(f"Attempted to get from an empty queue for server {min_queued_server[0]}. This might indicate a logic error.")
                 self.add_access_log_entry(event="gen_done",user=self.user, ip_address=client_ip, access="Authorized", server=min_queued_server[0], nb_queued_requests_on_server=que.qsize())
-        else:
-            try:
-                response = requests.request(
-                    self.command,
-                    min_queued_server[1]['url'] + path,
-                    params=get_params,
-                    data=post_data, # Send raw bytes
-                    headers={k: v for k, v in self.headers.items() if k.lower() not in ['host', 'connection', 'content-length']}
-                )
-                self._send_response(response)
-            except requests.exceptions.RequestException as ex:
-                print(f"Proxy request to {min_queued_server[0]} for non-gen endpoint failed: {ex}")
-                self.send_response(502)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "Bad Gateway: Upstream server request failed"}).encode('utf-8'))
-            except Exception as ex_other: # Catch any other unexpected error
-                print(f"Unexpected error during proxy (non-gen) to {min_queued_server[0]}: {ex_other}")
-                self.send_response(500)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "Internal Server Error"}).encode('utf-8'))
+            return
+
+        # Block all other POST endpoints with an error message
+        if self.command == "POST":
+            self.add_access_log_entry(
+                event='blocked_post',
+                user=self.user,
+                ip_address=client_ip,
+                access="Denied",
+                server=min_queued_server[0],
+                nb_queued_requests_on_server=min_queued_server[1]['queue'].qsize(),
+                error=f"Blocked POST to {path}"
+            )
+            self.send_response(403)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": f"Forbidden: POST to '{path}' is not allowed. Allowed POST endpoints: {', '.join(allowed_post_paths)}"
+            }).encode('utf-8'))
+            return
+
+        # For any other method, fallback to previous logic (should probably never be reached)
+        try:
+            response = requests.request(
+                self.command,
+                min_queued_server[1]['url'] + path,
+                params=get_params,
+                data=post_data,
+                headers={k: v for k, v in self.headers.items() if k.lower() not in ['host', 'connection', 'content-length']}
+            )
+            self._send_response(response)
+        except requests.exceptions.RequestException as ex:
+            print(f"Proxy request to {min_queued_server[0]} for non-gen endpoint failed: {ex}")
+            self.send_response(502)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Bad Gateway: Upstream server request failed"}).encode('utf-8'))
+        except Exception as ex_other:
+            print(f"Unexpected error during proxy (non-gen) to {min_queued_server[0]}: {ex_other}")
+            self.send_response(500)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "Internal Server Error"}).encode('utf-8'))
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
