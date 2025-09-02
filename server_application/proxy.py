@@ -11,6 +11,7 @@ from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
 import requests
+from usage_utils import log_usage  # <-- Use the utility module
 
 USERS_FILE_PATH = "authorized_users.csv"
 CONFIG_FILE_PATH = "workers.csv"
@@ -232,6 +233,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             que = min_queued_server[1]['queue']
             self.add_access_log_entry(event="gen_request", user=self.user, ip_address=client_ip, access="Authorized", server=min_queued_server[0], nb_queued_requests_on_server=que.qsize())
             que.put_nowait(1)
+            import time
+            start_time = time.time()
             try:
                 post_data_dict = {}
                 is_streaming = False
@@ -272,6 +275,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": "Internal Server Error"}).encode('utf-8'))
             finally:
+                duration = time.time() - start_time
+                # Log usage statistics for successful requests
+                if self.user and self.user != "unknown" and duration > 0:
+                    try:
+                        log_usage(self.user, duration)
+                    except Exception as e:
+                        print(f"Failed to log usage for user {self.user}: {e}")
                 if not que.empty(): # Ensure queue is not empty before get
                     que.get_nowait()
                 else:

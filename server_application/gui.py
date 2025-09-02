@@ -13,6 +13,11 @@ import gradio as gr
 import pandas as pd
 import requests
 from dateutil.relativedelta import relativedelta
+import plotly.graph_objs as go
+
+# import sys
+# sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# from usage_utils import log_usage
 
 from proxy import RequestHandler, ThreadedHTTPServer, LOG_FILE_PATH
 
@@ -29,6 +34,7 @@ if not OLLAMA_HELPER_API_KEY:
 WORKER_CONFIG_PATH = 'workers.csv'
 AUTHORIZED_USERS_CONFIG_PATH = 'authorized_users.csv'
 MODELS_CONFIG_PATH = 'models.csv'
+USAGE_STATS_PATH = 'usage_stats.json'
 
 
 def get_worker_status():
@@ -220,6 +226,18 @@ def get_users():
         pd.DataFrame(columns=['user', 'expirationDate', 'accessKey']).to_csv(AUTHORIZED_USERS_CONFIG_PATH, index=False, encoding='utf-8')
     return pd.read_csv(AUTHORIZED_USERS_CONFIG_PATH)
 
+def get_users_markdown():
+    users_df = get_users()
+    if users_df.empty or 'user' not in users_df.columns:
+        return "No registered users."
+    users_sorted = users_df.sort_values(by='user', key=lambda x: x.str.lower())
+    header = "| Username | Registered until | AccessKey |\n|---|---|---|"
+    rows = [
+        f"| **{row['user']}** | {row['expirationDate']} | `{row['accessKey']}` |"
+        for _, row in users_sorted.iterrows()
+    ]
+    return "### Registered Users\n\n" + header + "\n" + "\n".join(rows) if rows else "No registered users."
+
 
 def add_global_model(model_name):
 
@@ -302,8 +320,12 @@ def add_user(new_user_name, new_user_expiration=None):
 
     def generate_key(length=20):
         """Generate a random key of given length"""
-        chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+        chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789'
         return ''.join(random.choice(chars) for _ in range(length))
+
+    if len(new_user_name) == 0 or new_user_name == "":
+        gr.Warning("No username provided.")
+        return get_users_markdown()
 
     if not new_user_expiration:
         new_user_expiration = (datetime.today() + relativedelta(months=6)).strftime("%d.%m.%Y")
@@ -312,7 +334,7 @@ def add_user(new_user_name, new_user_expiration=None):
     users = pd.concat([pd.read_csv(AUTHORIZED_USERS_CONFIG_PATH), new_user], ignore_index=True)
 
     users.to_csv(AUTHORIZED_USERS_CONFIG_PATH, index=False, encoding='utf-8')
-    return users
+    return get_users_markdown()
 
 
 def add_worker(new_worker_name, new_worker_url):
@@ -404,9 +426,8 @@ def add_missing_models_generator():
 def remove_user(user_name):
     users = pd.read_csv(AUTHORIZED_USERS_CONFIG_PATH)
     users = users[users['user'] != user_name]
-
     users.to_csv(AUTHORIZED_USERS_CONFIG_PATH, index=False, encoding='utf-8')
-    return users
+    return get_users_markdown()
 
 
 def remove_model(model_name):
@@ -482,6 +503,7 @@ def login(password):
     """
     if password == CORRECT_PASSWORD:
         return (
+            gr.update(visible=True),
             gr.update(visible=True),
             gr.update(visible=True),
             gr.update(visible=True),
@@ -580,6 +602,87 @@ def start_cleanup_thread(intervall_hours=2):
     return thread
 
 
+
+def usage_logger_background():
+    """Background thread to periodically flush in-memory usage logs if needed."""
+    # This is a placeholder for future batching if needed.
+    pass
+
+
+def start_usage_logger_thread():
+    thread = threading.Thread(target=usage_logger_background, daemon=True)
+    thread.start()
+    return thread
+
+
+def load_usage_stats():
+    if not os.path.exists(USAGE_STATS_PATH):
+        return []
+    try:
+        with open(USAGE_STATS_PATH, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading usage stats: {e}")
+        return []
+
+
+def aggregate_usage_stats(window_hours=None, window_days=None, window_months=None):
+    """Aggregate usage stats for a given time window."""
+    stats = load_usage_stats()
+    now = datetime.utcnow()
+    if window_hours:
+        cutoff = now - pd.Timedelta(hours=window_hours)
+    elif window_days:
+        cutoff = now - pd.Timedelta(days=window_days)
+    elif window_months:
+        cutoff = now - pd.DateOffset(months=window_months)
+    else:
+        cutoff = datetime.min
+    per_user = {}
+    for entry in stats:
+        try:
+            ts = datetime.fromisoformat(entry["timestamp"])
+            if ts < cutoff:
+                continue
+            user = entry.get("user", "unknown")
+            duration = float(entry.get("duration", 0))
+            if user not in per_user:
+                per_user[user] = {"calls": 0, "duration": 0.0}
+            per_user[user]["calls"] += 1
+            per_user[user]["duration"] += duration
+        except Exception:
+            continue
+    return per_user
+
+
+def plot_usage(window_label, window_hours=None, window_days=None, window_months=None):
+    per_user = aggregate_usage_stats(window_hours, window_days, window_months)
+    users = list(per_user.keys())
+    calls = [per_user[u]["calls"] for u in users]
+    durations = [per_user[u]["duration"] / 60.0 for u in users]  # convert to minutes
+
+    fig_calls = go.Figure([go.Bar(x=users, y=calls)])
+    fig_calls.update_layout(title=f"Calls per User ({window_label})", xaxis_title="User", yaxis_title="Calls")
+
+    fig_durations = go.Figure([go.Bar(x=users, y=durations)])
+    fig_durations.update_layout(title=f"Total Usage Time per User ({window_label})", xaxis_title="User", yaxis_title="Minutes")
+
+    return fig_calls, fig_durations
+
+
+def get_all_usage_plots():
+    plots = []
+    for label, kwargs in [
+        ("Last 24 Hours", {"window_hours": 24}),
+        ("Last 7 Days", {"window_days": 7}),
+        ("Last 12 Months", {"window_months": 12}),
+    ]:
+        fig_calls, fig_durations = plot_usage(label, **kwargs)
+        plots.append(fig_calls)
+        plots.append(fig_durations)
+    return plots
+
+
 def create_gui():
     """
     Creates the Gradio interface.
@@ -667,13 +770,8 @@ def create_gui():
             """
             with gr.TabItem(label="Users", visible=False) as user_management:
 
-                gr.Markdown("## Registered Users")
+                users_markdown = gr.Markdown(get_users_markdown, elem_id="users-markdown")
 
-                users = gr.DataFrame(
-                    headers=["UserID", "Expiration Date"],
-                    interactive=True,
-                    row_count=(10, "dynamic")
-                )
                 with gr.Row():
                     with gr.Column(scale=1):
                         new_user_name = gr.Textbox(label="User", type="text")
@@ -709,6 +807,31 @@ def create_gui():
                 def update_logs_display(lines_to_show_from_input):
                     return get_logs(num_lines=int(lines_to_show_from_input))
 
+            with gr.TabItem(label="Usage Statistics", visible=False) as admin_stats:
+                gr.Markdown("## Usage Statistics (per user)")
+
+                usage_plot_24h_calls = gr.Plot(label="Calls per User (24h)")
+                usage_plot_24h_time = gr.Plot(label="Total Usage Time (24h)")
+                usage_plot_7d_calls = gr.Plot(label="Calls per User (7d)")
+                usage_plot_7d_time = gr.Plot(label="Total Usage Time (7d)")
+                usage_plot_12mo_calls = gr.Plot(label="Calls per User (12mo)")
+                usage_plot_12mo_time = gr.Plot(label="Total Usage Time (12mo)")
+                refresh_usage_btn = gr.Button("Refresh Usage Stats")
+
+                def refresh_usage_plots():
+                    figs = get_all_usage_plots()
+                    # figs: [24h_calls, 24h_time, 7d_calls, 7d_time, 12mo_calls, 12mo_time]
+                    return figs
+
+                refresh_usage_btn.click(
+                    fn=refresh_usage_plots,
+                    inputs=None,
+                    outputs=[
+                        usage_plot_24h_calls, usage_plot_24h_time,
+                        usage_plot_7d_calls, usage_plot_7d_time,
+                        usage_plot_12mo_calls, usage_plot_12mo_time
+                    ]
+                )
 
         """
             <----- ADMIN LOGIN ----->
@@ -726,7 +849,7 @@ def create_gui():
             fn=login,
             inputs=password_input,
             outputs=[
-                worker_model_management, user_management, worker_mangagement, admin_logs, admin_login_control,
+                worker_model_management, user_management, worker_mangagement, admin_logs, admin_stats, admin_login_control,
                 model_management, login_status
             ]
         )
@@ -735,7 +858,7 @@ def create_gui():
             fn=login,
             inputs=password_input,
             outputs=[
-                worker_model_management, user_management, worker_mangagement, admin_logs, admin_login_control,
+                worker_model_management, user_management, worker_mangagement, admin_logs, admin_stats, admin_login_control,
                 model_management, login_status
             ]
         )
@@ -743,13 +866,13 @@ def create_gui():
         add_user_btn.click(
             fn=lambda name, expiration: add_user(name, new_user_expiration=expiration),
             inputs=[new_user_name, new_user_expiration],
-            outputs=users
+            outputs=users_markdown
         )
 
         remove_user_btn.click(
             fn=lambda name: remove_user(name),
             inputs=[new_user_name],
-            outputs=users
+            outputs=users_markdown
         )
 
         add_worker_btn.click(
@@ -806,42 +929,28 @@ def create_gui():
             outputs=log_output_textbox
         )
 
-        global_models.change(
-            fn=get_worker_models,
-            inputs=None,
-            outputs=worker_models
-        )
-
-        status_timer = gr.Timer(value=3.0)
-        status_timer.tick(
-            fn=get_worker_status,
-            inputs=None,
-            outputs=worker_status
-        )
-        status_timer.tick(
-            fn=get_worker_models,
-            inputs=None,
-            outputs=worker_models
-        )
-        status_timer.tick(
-            fn=get_global_models,
-            inputs=None,
-            outputs=global_models
-        )
-
         # Initial loads
         def on_load():
             server_status = get_worker_status()
             logs = get_logs(num_lines=default_log_lines)
             models = get_global_models()
             worker_status = get_worker_models()
-            users = get_users()
-            return server_status, logs, models, worker_status, users
+            users_md = get_users_markdown()
+            usage_figs = get_all_usage_plots()
+            return (
+                server_status, logs, models, worker_status, users_md,
+                *usage_figs
+            )
 
         demo.load(
             on_load,
             inputs=None,
-            outputs=[worker_status, log_output_textbox, global_models, worker_models, users]
+            outputs=[
+                worker_status, log_output_textbox, global_models, worker_models, users_markdown,
+                usage_plot_24h_calls, usage_plot_24h_time,
+                usage_plot_7d_calls, usage_plot_7d_time,
+                usage_plot_12mo_calls, usage_plot_12mo_time
+            ]
         )
 
     return demo
@@ -910,7 +1019,7 @@ def main():
     proxy_thread.start()
 
     start_cleanup_thread(intervall_hours=2)
-
+    start_usage_logger_thread()
     start_gui(args.gui_port)
 
     if proxy_thread.is_alive():
