@@ -14,5 +14,8 @@ sudo systemctl enable ollama_helper.service
 sudo systemctl start ollama_helper.service
 ```
 
+Afterwards modify the ollama_worker.env to contain the correct port and the OLLAMA_HELPER_API_KEY that is needed for the server to authenticate correctly.
+
+
 See you space cowboy!
 
