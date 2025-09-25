@@ -19,16 +19,16 @@ import plotly.graph_objs as go
 # sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # from usage_utils import log_usage
 
-from proxy import RequestHandler, ThreadedHTTPServer, LOG_FILE_PATH
+from proxy import RequestHandler, ThreadedHTTPServer, LOG_FILE_PATH, start_worker_state_refresher_thread, init_worker_state_cache
 
 
 CORRECT_PASSWORD = os.environ.get("ADMIN_PASSWORD")
 if not CORRECT_PASSWORD:
-    raise RuntimeError(f"ADMIN_PASSWORD environment variable not set. Please provide a secret Admin password.")
+    raise RuntimeError("ADMIN_PASSWORD environment variable not set. Please provide a secret Admin password.")
 
 OLLAMA_HELPER_API_KEY = os.environ.get("OLLAMA_HELPER_API_KEY")
 if not OLLAMA_HELPER_API_KEY:
-    raise RuntimeError(f"OLLAMA_HELPER_API_KEY environment variable not set. Please provide a secret OLLAMA_HELPER_API_KEY.")
+    raise RuntimeError("OLLAMA_HELPER_API_KEY environment variable not set. Please provide a secret OLLAMA_HELPER_API_KEY.")
 
 
 WORKER_CONFIG_PATH = 'workers.csv'
@@ -132,6 +132,89 @@ def get_worker_status():
         import traceback
         traceback.print_exc()
         return [["Error processing server data.", str(e), "", ""]]
+
+
+# NEW: Health monitoring utilities
+def ensure_workers_csv_has_healthy_column():
+    try:
+        df = pd.read_csv(WORKER_CONFIG_PATH)
+    except FileNotFoundError:
+        return
+    if 'healthy' not in df.columns:
+        df['healthy'] = True
+        df.to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
+
+
+def _coerce_bool(val, default=True):
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if v in ('true', '1', 'yes', 'y'):
+            return True
+        if v in ('false', '0', 'no', 'n'):
+            return False
+    return default
+
+
+def check_worker_availability(url):
+    try:
+        if not isinstance(url, str) or not re.match(r'^https?://', url):
+            return False
+        resp = requests.get(f"{url.rstrip('/')}/api/version", timeout=3)
+        if resp.status_code == 200:
+            # basic sanity check on json
+            try:
+                _ = resp.json()
+            except Exception:
+                pass
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def health_monitor_loop(interval_seconds=60):
+    while True:
+        try:
+            df = pd.read_csv(WORKER_CONFIG_PATH)
+            changed = False
+            # ensure column exists
+            if 'healthy' not in df.columns:
+                df['healthy'] = True
+                changed = True
+            for idx, row in df.iterrows():
+                enabled = _coerce_bool(row.get('enabled', True), True)
+                url = row.get('url')
+                prev_healthy = _coerce_bool(row.get('healthy', True), True)
+                # Only probe enabled workers; disabled ones are marked healthy by default to avoid hiding them
+                new_healthy = check_worker_availability(url) if enabled else prev_healthy
+                if bool(prev_healthy) != bool(new_healthy):
+                    df.at[idx, 'healthy'] = bool(new_healthy)
+                    changed = True
+            if changed:
+                # atomic-ish write
+                tmp = NamedTemporaryFile(mode='w', delete=False)
+                try:
+                    df.to_csv(tmp.name, index=False, encoding='utf-8')
+                    os.replace(tmp.name, WORKER_CONFIG_PATH)
+                finally:
+                    try:
+                        os.unlink(tmp.name)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Health monitor error: {e}")
+        time.sleep(interval_seconds)
+
+
+def start_health_monitor_thread(interval_seconds=60):
+    ensure_workers_csv_has_healthy_column()
+    t = threading.Thread(target=health_monitor_loop, kwargs={'interval_seconds': interval_seconds}, daemon=True)
+    t.start()
+    return t
 
 
 def get_logs(num_lines):
@@ -344,7 +427,11 @@ def add_worker(new_worker_name, new_worker_url):
 
     workers = pd.read_csv(WORKER_CONFIG_PATH)
 
-    new_worker = pd.DataFrame([{'name': new_worker_name, 'url': new_worker_url, 'enabled': True}])
+    # Ensure healthy column exists
+    if 'healthy' not in workers.columns:
+        workers['healthy'] = True
+
+    new_worker = pd.DataFrame([{'name': new_worker_name, 'url': new_worker_url, 'enabled': True, 'healthy': True}])
     workers = pd.concat([workers, new_worker], ignore_index=True)
     workers.to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
 
@@ -513,9 +600,16 @@ def login(password):
             gr.update(value="Login successful! Admin controls enabled.", visible=True)
         )
     else:
+        # Return 8 outputs matching the wired components, with only the status message changed.
         return (
-            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
-            gr.update(value="Incorrect password.", visible=True)
+            gr.update(),  # worker_model_management (no change)
+            gr.update(),  # user_management (no change)
+            gr.update(),  # worker_mangagement (no change)
+            gr.update(),  # admin_logs (no change)
+            gr.update(),  # admin_stats (no change)
+            gr.update(),  # admin_login_control (no change)
+            gr.update(),  # model_management (no change)
+            gr.update(value="Incorrect password.", visible=True)  # login_status
         )
 
 
@@ -579,12 +673,14 @@ def clean_expired_users():
         writer = csv.DictWriter(temp_file, fieldnames=fieldnames)
         writer.writeheader()
 
-        for row in reader:
+        for rec in reader:
             try:
-                exp_date = datetime.strptime(row['expirationDate'], '%d.%m.%Y').date()
+                row_dict = {k: rec[k] for k in (fieldnames or rec.keys())}
+                exp_str = str(row_dict.get('expirationDate', '')).strip()
+                exp_date = datetime.strptime(exp_str, '%d.%m.%Y').date()
                 if exp_date >= today:
-                    writer.writerow(row)
-            except ValueError as e:
+                    writer.writerow(row_dict)
+            except Exception as e:
                 print(f"Skipping row due to error: {e}")
 
     os.replace(temp_file.name, AUTHORIZED_USERS_CONFIG_PATH)
@@ -718,7 +814,7 @@ def create_gui():
                                 disable_worker_btn = gr.Button("Disable")
                         update_ollama_btn = gr.Button("Update Ollama Version")
                     with gr.Column(scale=1):
-                        ollama_update_log = gr.Textbox(
+                        gr.Textbox(
                             label="Ollama Update Log",
                             lines=10,
                             max_lines=10,
@@ -1004,7 +1100,9 @@ def main():
 
     if not os.path.exists(WORKER_CONFIG_PATH):
         print("GUI Warning: Workers config file not found. Creating new file.")
-        pd.DataFrame(columns=['name', 'url', 'enabled']).to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
+        pd.DataFrame(columns=['name', 'url', 'enabled', 'healthy']).to_csv(WORKER_CONFIG_PATH, index=False, encoding='utf-8')
+    else:
+        ensure_workers_csv_has_healthy_column()
     get_users()
     get_global_models()
     get_logs(1)
@@ -1014,6 +1112,15 @@ def main():
     print(f"Users list file: {AUTHORIZED_USERS_CONFIG_PATH}")
     print(f"Log file: {LOG_FILE_PATH}")
     print(f"Models file: {MODELS_PATH}")
+
+    # Pre-warm worker cache (VRAM, available & loaded models) to avoid cold-start misses
+    init_worker_state_cache()
+
+    # Start health monitor thread to auto-toggle routing based on availability
+    start_health_monitor_thread(interval_seconds=60)
+
+    # Start background refresher to keep worker cache (VRAM/models) warm
+    start_worker_state_refresher_thread(interval_seconds=15, models_ttl_seconds=30)
 
     proxy_thread = threading.Thread(target=start_proxy_server, args=(args.port, RequestHandler), daemon=True)
     proxy_thread.start()
