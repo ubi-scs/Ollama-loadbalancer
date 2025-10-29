@@ -708,8 +708,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({
-                    "error": f"Model '{model}' is not available on any enabled and healthy workers.",
-                    "available_models": available_models
+                    "error": f"Model '{model}' is not available on any enabled and healthy workers. available_models:\n{available_models}"
                 }).encode('utf-8'))
                 return
 
