@@ -313,6 +313,22 @@ def _refresh_available_models(name: str, ttl_seconds: int = 60):
             return set(_WORKERS.get(name, {}).get('available_models') or set())
 
 
+def _get_available_models_for_enabled_healthy(force_refresh: bool = False):
+    """Return sorted list of unique models available across all enabled and healthy workers."""
+    _refresh_worker_registry()
+    names = _get_enabled_healthy_workers()
+    models = set()
+    for n in names:
+        try:
+            if force_refresh:
+                _refresh_available_models(n, ttl_seconds=0)
+            with _STATE_LOCK:
+                models |= set(_WORKERS.get(n, {}).get('available_models') or set())
+        except Exception:
+            continue
+    return sorted(models)
+
+
 def _get_enabled_healthy_workers():
     df = _get_workers_df()
     candidates = []
@@ -665,10 +681,36 @@ class RequestHandler(BaseHTTPRequestHandler):
             chosen = _choose_backend_for_model(model or "")
             print(f"Chosen backend for model '{model}': {chosen[0] if chosen else 'None'}")
             if not chosen:
-                self.send_response(503)
+                # Provide a descriptive error including currently usable models
+                _refresh_worker_registry()
+                enabled_healthy = _get_enabled_healthy_workers()
+                if not enabled_healthy:
+                    self.send_response(503)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "error": "Service Unavailable: No enabled and healthy workers available."
+                    }).encode('utf-8'))
+                    return
+
+                available_models = _get_available_models_for_enabled_healthy(force_refresh=True)
+                # Log and return 404 if a model was requested but not found
+                self.add_access_log_entry(
+                    event='model_not_available',
+                    user=self.user,
+                    ip_address=client_ip,
+                    access="Authorized",
+                    server="None",
+                    nb_queued_requests_on_server=0,
+                    error=f"Requested model '{model}' not available"
+                )
+                self.send_response(404)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": "Service Unavailable: No suitable backend available."}).encode('utf-8'))
+                self.wfile.write(json.dumps({
+                    "error": f"Model '{model}' is not available on any enabled and healthy workers.",
+                    "available_models": available_models
+                }).encode('utf-8'))
                 return
 
             name, target_url, que, _, _ = chosen
