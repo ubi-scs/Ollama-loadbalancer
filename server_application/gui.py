@@ -43,13 +43,24 @@ def get_worker_status():
 
     workers = pd.read_csv(WORKER_CONFIG_PATH)
 
+    # Ensure healthy column exists to prevent KeyError and allow skipping offline workers
+    if 'healthy' not in workers.columns:
+        workers['healthy'] = True
+
     try:
         for _, row in workers.iterrows():
             worker_url = row['url']
             worker_name = row['name']
-            if not row['enabled']:
-                status_data.append([worker_name, worker_url, 'disabled', 'disabled', 'disabled', 'disabled',
-                                    row['enabled']])
+            enabled = _coerce_bool(row.get('enabled', True), True)
+            healthy = _coerce_bool(row.get('healthy', True), True)
+
+            if not enabled:
+                status_data.append([worker_name, worker_url, 'disabled', 'disabled', 'disabled', 'disabled', enabled])
+                continue
+
+            # If worker is marked unhealthy, avoid network calls and show as offline
+            if not healthy:
+                status_data.append([worker_name, worker_url, 'offline', 'offline', 'offline', 'offline', enabled])
                 continue
 
             running_models_str = "N/A"  # Default
@@ -120,7 +131,7 @@ def get_worker_status():
                                 gpu_utilization_str,
                                 vram_usage_str,
                                 ollama_version,
-                                row['enabled']])
+                                enabled])
 
 
         if not status_data:
@@ -254,8 +265,14 @@ def get_global_models():
 def get_worker_models():
     worker_status_list = []
 
-    # Step 1: get worker info
-    server_status = get_worker_status()
+    # Step 1: read worker info directly from config to respect healthy flag
+    try:
+        workers_df = pd.read_csv(WORKER_CONFIG_PATH)
+    except Exception:
+        workers_df = pd.DataFrame(columns=['name', 'url', 'enabled', 'healthy'])
+
+    if 'healthy' not in workers_df.columns:
+        workers_df['healthy'] = True
 
     # Step 2: load global models
     global_models_df = get_global_models()
@@ -265,14 +282,21 @@ def get_worker_models():
 
     global_models = set(global_models_df['Model'].dropna().astype(str).str.strip())
 
-    # Step 3: For each worker, fetch available models and compare
-    for worker_entry in server_status:
-        if len(worker_entry) < 2:
-            continue
-        worker_name = worker_entry[0]
-        worker_url = worker_entry[1]
+    # Step 3: For each worker, skip disabled or unhealthy to avoid timeouts; otherwise fetch available models
+    for _, row in workers_df.iterrows():
+        worker_name = row.get('name')
+        worker_url = row.get('url')
+        enabled = _coerce_bool(row.get('enabled', True), True)
+        healthy = _coerce_bool(row.get('healthy', True), True)
 
-        api_tags_url = f"{worker_url.rstrip('/')}/api/tags"
+        if not enabled:
+            worker_status_list.append([worker_name, "Disabled", ""])
+            continue
+        if not healthy:
+            worker_status_list.append([worker_name, "Offline", ""])
+            continue
+
+        api_tags_url = f"{str(worker_url).rstrip('/')}/api/tags"
         try:
             resp = requests.get(api_tags_url, timeout=5)
             if resp.status_code != 200:
@@ -282,7 +306,6 @@ def get_worker_models():
 
             tags_data = resp.json()
             if isinstance(tags_data, dict) and "models" in tags_data:
-
                 worker_models = set(str(m.get("name", "")).strip() for m in tags_data["models"])
             else:
                 worker_status_list.append([worker_name, "Fetch Error: Unexpected response format", ""])
@@ -1116,8 +1139,8 @@ def main():
     # Pre-warm worker cache (VRAM, available & loaded models) to avoid cold-start misses
     init_worker_state_cache()
 
-    # Start health monitor thread to auto-toggle routing based on availability
-    start_health_monitor_thread(interval_seconds=60)
+    # Start health monitor thread to auto-toggle routing based on availability (faster reaction)
+    start_health_monitor_thread(interval_seconds=15)
 
     # Start background refresher to keep worker cache (VRAM/models) warm
     start_worker_state_refresher_thread(interval_seconds=15, models_ttl_seconds=30)
