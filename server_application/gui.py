@@ -35,6 +35,102 @@ WORKER_CONFIG_PATH = 'workers.csv'
 AUTHORIZED_USERS_CONFIG_PATH = 'authorized_users.csv'
 MODELS_CONFIG_PATH = 'models.csv'
 USAGE_STATS_PATH = 'usage_stats.json'
+MODEL_SIZES_PATH = 'model_sizes.csv'
+
+
+def _abs_path(local_path: str) -> str:
+    return str(os.path.join(os.path.dirname(os.path.abspath(__file__)), local_path))
+
+def _parse_model_size_from_string(model: str):
+    """Parse size like ':7b', ':0.5B', ':500m' from model string. Returns billions (float) or None."""
+    if not isinstance(model, str):
+        return None
+    s = model.strip()
+    m = re.search(r"(?i)(?:.*:)?(\d+(?:\.\d+)?)([bm])$", s)
+    if not m:
+        return None
+    try:
+        value = float(m.group(1))
+    except ValueError:
+        return None
+    unit = m.group(2).lower()
+    if unit == 'b':
+        return value
+    if unit == 'm':
+        return value / 1000.0
+    return None
+
+
+def _estimate_required_vram_mb(size_billion: float | None):
+    base = 22000
+    if size_billion is None:
+        return base
+    if size_billion <= 7:
+        return 8192
+    if size_billion <= 14:
+        return base // 2
+    if size_billion <= 32:
+        return base
+    if size_billion <= 70:
+        return base * 2
+    return 81920
+
+
+def _ensure_model_sizes_file():
+    path = _abs_path(MODEL_SIZES_PATH)
+    if not os.path.exists(path):
+        pd.DataFrame(columns=['model', 'size_billion']).to_csv(path, index=False, encoding='utf-8')
+
+
+def _save_model_size(model: str, size_billion: float):
+    try:
+        _ensure_model_sizes_file()
+        path = _abs_path(MODEL_SIZES_PATH)
+        df = pd.read_csv(path)
+        if 'model' not in df.columns or 'size_billion' not in df.columns:
+            df = pd.DataFrame(columns=['model', 'size_billion'])
+        if not df.empty and (df['model'] == model).any():
+            df.loc[df['model'] == model, 'size_billion'] = size_billion
+        else:
+            df = pd.concat([df, pd.DataFrame([{'model': model, 'size_billion': size_billion}])], ignore_index=True)
+        tmp = path + '.tmp'
+        df.to_csv(tmp, index=False, encoding='utf-8')
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f"GUI: Failed to save model size for {model}: {e}")
+
+
+def _get_worker_vram_total_mb(url: str, name: str, df: pd.DataFrame) -> int | None:
+    total = None
+    try:
+        if 'vram_total_mb' in df.columns:
+            row = df[df['name'] == name]
+            if not row.empty:
+                val = row.iloc[0].get('vram_total_mb')
+                if pd.notna(val):
+                    try:
+                        total = int(float(val))
+                    except Exception:
+                        total = None
+        if not total or total <= 0:
+            helper_url = f"{str(url).replace('11434','18034').rstrip('/')}/gpu/vram"
+            resp = requests.get(helper_url, headers={"x-api-key": OLLAMA_HELPER_API_KEY}, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json() or {}
+                t = int(data.get('vram_total_mb', 0))
+                if t > 0:
+                    total = t
+                    try:
+                        df.loc[df['name'] == name, 'vram_total_mb'] = int(t)
+                        path = WORKER_CONFIG_PATH if os.path.isabs(WORKER_CONFIG_PATH) else _abs_path(WORKER_CONFIG_PATH)
+                        tmp = path + '.tmp'
+                        df.to_csv(tmp, index=False, encoding='utf-8')
+                        os.replace(tmp, path)
+                    except Exception as e:
+                        print(f"GUI: Failed to persist vram_total_mb for {name}: {e}")
+    except Exception as e:
+        print(f"GUI: Error fetching VRAM total for {name}: {e}")
+    return total
 
 
 def get_worker_status():
@@ -57,6 +153,14 @@ def get_worker_status():
             if not enabled:
                 status_data.append([worker_name, worker_url, 'disabled', 'disabled', 'disabled', 'disabled', enabled])
                 continue
+
+            # Quick probe to avoid UI timeouts if the healthy flag is stale
+            if healthy:
+                try:
+                    if not check_worker_availability(worker_url):
+                        healthy = False
+                except Exception:
+                    healthy = False
 
             # If worker is marked unhealthy, avoid network calls and show as offline
             if not healthy:
@@ -348,26 +452,67 @@ def get_users_markdown():
 def add_global_model(model_name):
 
     # if model name contains :latest, show warning and skip
-    if ":latest" in model_name:
+    if ":latest" in model_name.lower():
         gr.Warning(f"  - Skipping {model_name}: 'latest' tag not allowed. Please specify actual size so that we can manage model sizes properly.")
         return pd.read_csv(MODELS_CONFIG_PATH)
-    # same if size is not specified ie does not contain : with a number and b at the end
-    if not re.search(r":\d+[mb]$", model_name):
-        gr.Warning(f"  - Skipping {model_name}: Please specify model size in billions, e.g. modelname:4b")
+    # Parse and validate size (accept decimals and case-insensitive units)
+    parsed_size_b = _parse_model_size_from_string(model_name)
+    if parsed_size_b is None:
+        gr.Warning(f"  - Skipping {model_name}: Please specify model size like ':4b' or ':500m'.")
         return pd.read_csv(MODELS_CONFIG_PATH)
 
-    worker_status = get_worker_status()
-    for worker in worker_status:
+    # Persist size for backend routing heuristics
+    try:
+        _save_model_size(model_name, float(parsed_size_b))
+    except Exception:
+        pass
 
-        worker_name = worker[0]
-        url = worker[1]
+    required_vram = _estimate_required_vram_mb(parsed_size_b)
 
+    # Select workers: enabled + healthy with sufficient VRAM; else largest VRAM single worker
+    try:
+        workers_df = pd.read_csv(WORKER_CONFIG_PATH)
+    except Exception:
+        workers_df = pd.DataFrame(columns=['name', 'url', 'enabled', 'healthy'])
+
+    if 'healthy' not in workers_df.columns:
+        workers_df['healthy'] = True
+
+    candidates = []  # (name, url, total_vram)
+    for _, row in workers_df.iterrows():
+        name = row.get('name')
+        url = row.get('url')
+        enabled = _coerce_bool(row.get('enabled', True), True)
+        healthy = _coerce_bool(row.get('healthy', True), True)
+        if not (enabled and healthy):
+            continue
+        total_vram = _get_worker_vram_total_mb(url, name, workers_df)
+        candidates.append((name, url, total_vram))
+
+    if not candidates:
+        gr.Warning("No enabled and healthy workers available to pull the model.")
+        return pd.read_csv(MODELS_CONFIG_PATH)
+
+    fitting = [(n, u, v) for (n, u, v) in candidates if isinstance(v, (int, float)) and v is not None and v >= required_vram]
+
+    if fitting:
+        chosen = fitting
+        gr.Info("GPU-fit check: pulling on workers where the model fits in VRAM: " + ", ".join([f"{n}({int(v)}MB)" for n, _, v in chosen]))
+    else:
+        known = [c for c in candidates if isinstance(c[2], (int, float)) and c[2] is not None and c[2] > 0]
+        if known:
+            best = max(known, key=lambda x: x[2])
+            chosen = [best]
+            gr.Info(f"GPU-fit check: no worker can fully host on GPU; pulling only on largest VRAM worker {best[0]} ({int(best[2])}MB).")
+        else:
+            chosen = [candidates[0]]
+            gr.Warning("GPU-fit check: VRAM totals unknown. Pulling only on the first enabled, healthy worker as a fallback.")
+
+    # Perform pulls only on chosen workers
+    for worker_name, url, _ in chosen:
         if not url:
             continue
-
         gr.Info(f"Trying to add model {model_name} to {worker_name}")
-
-
 
 
         last_reported_percent = -1
@@ -463,6 +608,18 @@ def add_worker(new_worker_name, new_worker_url):
 
 def add_missing_models_generator():
     logs = []
+    # Snapshot workers and their VRAM totals for decisions
+    try:
+        workers_df = pd.read_csv(WORKER_CONFIG_PATH)
+    except Exception:
+        workers_df = pd.DataFrame(columns=['name', 'url', 'enabled', 'healthy'])
+
+    if 'healthy' not in workers_df.columns:
+        workers_df['healthy'] = True
+
+    # Build quick lookup by worker name
+    worker_rows = {str(row.get('name')): row for _, row in workers_df.iterrows()}
+
     server_status = get_worker_status()
     worker_models = get_worker_models()
 
@@ -472,7 +629,23 @@ def add_missing_models_generator():
             continue
 
         worker_name = getattr(worker, "Worker")
-        url = next((entry[1] for entry in server_status if entry[0] == worker_name), "")
+        # use config row to respect healthy/enabled and get URL
+        row = worker_rows.get(worker_name)
+        if not row is None:
+            enabled = _coerce_bool(row.get('enabled', True), True)
+            healthy = _coerce_bool(row.get('healthy', True), True)
+            url = row.get('url')
+        else:
+            enabled, healthy, url = True, True, next((entry[1] for entry in server_status if entry[0] == worker_name), "")
+
+        if not enabled:
+            logs.append(f"[Skipping {worker_name}] :: Worker disabled")
+            yield "\n".join(logs)
+            continue
+        if not healthy:
+            logs.append(f"[Skipping {worker_name}] :: Worker offline")
+            yield "\n".join(logs)
+            continue
 
         if not url:
             logs.append(f"[Skipping {worker_name}] :: URL not found")
@@ -485,6 +658,19 @@ def add_missing_models_generator():
         models = [model.strip() for model in status.split(',') if model.strip()]
 
         for model_name in models:
+            # Respect VRAM fit before pulling
+            size_b = _parse_model_size_from_string(model_name)
+            if size_b is None:
+                logs.append(f"  - Skipping {model_name}: missing or invalid size tag; expected like ':7b' or ':500m'")
+                yield "\n".join(logs)
+                continue
+            required_vram = _estimate_required_vram_mb(size_b)
+            total_vram = _get_worker_vram_total_mb(url, worker_name, workers_df)
+            if isinstance(total_vram, (int, float)) and total_vram is not None and total_vram < required_vram:
+                logs.append(f"  - Skipping {model_name}: requires ~{int(required_vram)}MB VRAM, {worker_name} has {int(total_vram)}MB")
+                yield "\n".join(logs)
+                continue
+
             last_reported_percent = -1
             try:
                 response = requests.post(
