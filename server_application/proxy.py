@@ -14,7 +14,7 @@ from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
 import requests
-from .usage_utils import log_usage  # <-- Use the utility module
+from usage_utils import log_usage  # <-- Use the utility module
 
 USERS_FILE_PATH = "authorized_users.csv"
 CONFIG_FILE_PATH = "workers.csv"
