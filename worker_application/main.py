@@ -9,13 +9,11 @@ logger = logging.getLogger(__name__)
 
 
 API_KEY_NAME = "OLLAMA_HELPER_API_KEY"
+# Do not raise at import time; defer validation to request handling
 API_KEY = os.getenv(API_KEY_NAME)
 
 HOST = os.getenv("WORKER_HOST", "0.0.0.0")
 PORT = int(os.getenv("WORKER_PORT", "8000"))
-
-if not API_KEY:
-    raise RuntimeError(f"{API_KEY_NAME} environment variable not set. Please provide a secret API Key.")
 
 
 async def verify_api_key(x_api_key: str = Header(..., description="The secret API key.")):
@@ -23,9 +21,16 @@ async def verify_api_key(x_api_key: str = Header(..., description="The secret AP
     Dependency to verify the API key in the request header.
 
     Raises:
-        HTTPException: If the API key is missing or invalid.
+        HTTPException: If the API key is missing or invalid, or server misconfigured.
     """
-    if x_api_key != API_KEY:
+    expected = os.getenv(API_KEY_NAME)
+    if not expected:
+        # Server misconfiguration
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server API key not configured"
+        )
+    if x_api_key != expected:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid or missing API Key"

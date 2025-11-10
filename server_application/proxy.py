@@ -14,7 +14,7 @@ from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
 import requests
-from usage_utils import log_usage  # <-- Use the utility module
+from .usage_utils import log_usage  # <-- Use the utility module
 
 USERS_FILE_PATH = "authorized_users.csv"
 CONFIG_FILE_PATH = "workers.csv"
@@ -371,7 +371,7 @@ def init_worker_state_cache():
 
 
 def _choose_backend_for_model(model: str):
-    # Refresh registry
+    # Refresh registry so we have up-to-date enabled/healthy workers & cached queues
     _refresh_worker_registry()
 
     # Ensure VRAM cached for candidates (best effort, non-blocking for requests thread)
@@ -382,20 +382,20 @@ def _choose_backend_for_model(model: str):
         except Exception:
             pass
 
-    # Model size if provided
+    # Resolve / infer model size (order: cached -> parse from name -> fetch from /api/show)
     sizes_cache = _load_model_sizes()
     size_b = sizes_cache.get(model)
-    if size_b is None:
+    if size_b is None and model:
         parsed = _parse_model_size_from_string(model)
         if parsed is not None:
             size_b = parsed
             _save_model_size(model, size_b)
         else:
             size_b = _fetch_and_cache_model_size(model)
+
     required_vram = _estimate_required_vram_mb(size_b)
 
-    # Build list of worker info tuples using ONLY cached state
-    # (name, url, q, vram_total_mb, loaded_models, vram_tier, available_models)
+    # Snapshot worker state under lock to avoid holding it while computing decisions
     def _snapshot():
         info = []
         with _STATE_LOCK:
@@ -405,7 +405,7 @@ def _choose_backend_for_model(model: str):
                     continue
                 url = w.get('url')
                 q = w.get('queue')
-                vram = w.get('vram_total_mb')
+                vram = w.get('vram_total_mb')  # may be None if not yet discovered
                 loaded_cached = set(w.get('loaded_models') or [])
                 available_cached = set(w.get('available_models') or [])
                 info.append((n, url, q, vram, loaded_cached, _vram_tier(vram), available_cached))
@@ -413,11 +413,11 @@ def _choose_backend_for_model(model: str):
 
     workers_info = _snapshot()
 
-    # If a model is specified, restrict candidates to those that have it available
+    # If a model is specified, restrict candidates to those that have it available (tagged) or already loaded.
     if model:
         filtered = [w for w in workers_info if model in w[6] or model in w[4]]
         if not filtered:
-            # Force a one-time refresh of available models to avoid cold-start misses
+            # Force a refresh of available model tags to reduce false negatives on cold start
             for n in names:
                 try:
                     _refresh_available_models(n, ttl_seconds=0)
@@ -429,41 +429,71 @@ def _choose_backend_for_model(model: str):
         if not workers_info:
             return None
 
-    # A) Model already loaded somewhere
-    loaded_workers = [(n, url, q, vram, tier) for (n, url, q, vram, loaded, tier, avail) in workers_info if model and model in loaded]
+    # --- Strategy ---
+    # 1) Prefer a worker where the model is already loaded (to avoid load overhead). Among those:
+    #    a) Empty queue first; if multiple, choose one with lowest VRAM (then queue size as tie-break)
+    #    b) Otherwise lowest queue length.
+    # 2) If not loaded anywhere, pick the worker with the LOWEST VRAM that can still fit the model, then by queue size.
+    #    (Explicit improvement requested.)
+    # 3) If no worker fits by VRAM, fallback to one that has the model available (or any) with highest VRAM & lowest queue.
+
+    if model:
+        loaded_workers = [(n, url, q, vram, tier) for (n, url, q, vram, loaded, tier, avail) in workers_info if model in loaded]
+    else:
+        loaded_workers = []
+
     if loaded_workers:
         empties = [w for w in loaded_workers if w[2].qsize() == 0]
         if empties:
+            # Sort by VRAM ascending (so we don't waste high VRAM node if a smaller one suffices), then queue size
             chosen = sorted(empties, key=lambda x: ((x[3] or 1_000_000), x[2].qsize()))[0]
             return chosen
-        # 2) try same-tier empty, without any loaded models yet, but with the model available
+        # Try same-tier empty without any models loaded yet but with model available (opportunity placement)
         tiers = {w[4] for w in loaded_workers}
         same_tier_candidates = [w for w in workers_info if w[5] in tiers and len(w[4]) == 0 and w[2].qsize() == 0 and (not model or model in w[6])]
         if same_tier_candidates:
             chosen = sorted(same_tier_candidates, key=lambda x: ((x[3] or 1_000_000), x[2].qsize()))[0]
             return (chosen[0], chosen[1], chosen[2], chosen[3], chosen[5])
+        # Fallback: lowest queue among loaded
         chosen = sorted(loaded_workers, key=lambda x: x[2].qsize())[0]
         return chosen
 
-    # B) Model not loaded: choose by fit, availability, and shortest queue
-    fitting = [w for w in workers_info if (w[3] or 0) >= required_vram]
+    # Model not loaded anywhere -> choose most "appropriate" (lowest VRAM that can fit it)
+    fitting = []
+    for w in workers_info:
+        vram = w[3]
+        if vram is None:
+            continue  # unknown VRAM can't be guaranteed to fit; skip for primary selection
+        if vram >= required_vram:
+            if not model or model in w[6]:  # ensure availability if model specified
+                fitting.append(w)
+
+    if fitting:
+        # Sort by VRAM ascending first (tightest fit), then queue size
+        fitting_sorted = sorted(fitting, key=lambda x: (x[3], x[2].qsize()))
+        best = fitting_sorted[0]
+        return (best[0], best[1], best[2], best[3], best[5])
+
+    # If no known-VRAM worker fits, allow unknown VRAM workers that have the model available (optimistic attempt)
     if model:
-        fitting = [w for w in fitting if model in w[6]]
+        unknown_candidates = [w for w in workers_info if w[3] is None and model in w[6]]
+    else:
+        unknown_candidates = [w for w in workers_info if w[3] is None]
+    if unknown_candidates:
+        # Prefer smallest queue among unknown VRAM
+        best = sorted(unknown_candidates, key=lambda x: x[2].qsize())[0]
+        return (best[0], best[1], best[2], best[3], best[5])
 
-    if not fitting:
-        # Fallback: prefer any with model availability first even if VRAM insufficient, else any
-        if workers_info:
-            candidates = [w for w in workers_info if (not model or model in w[6])]
-            if not candidates:
-                candidates = workers_info
-            best = sorted(candidates, key=lambda x: (-(x[3] or 0), x[2].qsize()))[0]
-            return (best[0], best[1], best[2], best[3], best[5])
-        return None
+    # Final fallback: pick any candidate (favor availability & higher VRAM and low queue)
+    if workers_info:
+        candidates = [w for w in workers_info if (not model or model in w[6])]
+        if not candidates:
+            candidates = workers_info
+        # Higher VRAM might reduce OOM risk here since fit failed earlier. Sort by (-vram, queue)
+        best = sorted(candidates, key=lambda x: (-(x[3] or 0), x[2].qsize()))[0]
+        return (best[0], best[1], best[2], best[3], best[5])
 
-    min_vram = min(w[3] for w in fitting if w[3] is not None)
-    close_fit = [w for w in fitting if w[3] == min_vram]
-    best = sorted(close_fit, key=lambda x: x[2].qsize())[0]
-    return (best[0], best[1], best[2], best[3], best[5])
+    return None
 
 
 #ollama api endpoints:

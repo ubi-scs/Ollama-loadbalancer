@@ -1,0 +1,34 @@
+stages:
+  - test
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+cache:
+  paths:
+    - .cache/pip
+
+# Single test job; extend later with lint/coverage if desired
+pytest:
+  stage: test
+  image: python:3.11-slim
+  before_script:
+    - python -V
+    - apt-get update && apt-get install -y build-essential gcc || true
+    - pip install --upgrade pip
+    - pip install -r server_application/requirements.txt
+    - pip install -r worker_application/requirements.txt
+    - pip install pytest
+  script:
+    - pytest -q
+  artifacts:
+    when: always
+    reports:
+      junit: junit-report.xml
+    paths:
+      - junit-report.xml
+  after_script:
+    - echo "Pipeline finished."
+
