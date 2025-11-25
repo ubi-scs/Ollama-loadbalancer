@@ -104,9 +104,7 @@ def _probe_worker_health(name: str):
     detail = ''
     reason = ''
     try:
-        # Use URL exactly as configured and include API key header
-        target = f"{url.rstrip('/')}/api/version"
-        resp = requests.get(target, headers={"x-api-key": os.environ.get("OLLAMA_HELPER_API_KEY", "")}, timeout=_HEALTH_PROBE_TIMEOUT)
+        resp = requests.get(f"{url.rstrip('/')}/api/version", timeout=_HEALTH_PROBE_TIMEOUT)
         if resp.status_code == 200:
             success = True
         else:
