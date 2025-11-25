@@ -76,6 +76,7 @@ def _probe_worker_health(name: str):
     try:
         df = _get_workers_df()
     except Exception:
+        traceback.print_exc()
         return
     row = df[df['name'] == name]
     if row.empty:
@@ -110,9 +111,11 @@ def _probe_worker_health(name: str):
             reason = 'http_error'
             detail = f'status={resp.status_code}'
     except requests.exceptions.Timeout:
+        traceback.print_exc()
         reason = 'timeout'
         detail = 'probe timeout'
     except Exception as e:
+        traceback.print_exc()
         reason = 'exception'
         detail = str(e)
     with _STATE_LOCK:
@@ -173,6 +176,7 @@ def _load_model_sizes():
             try:
                 sizes[str(row['model'])] = float(row['size_billion'])
             except Exception:
+                traceback.print_exc()
                 continue
     return sizes
 
@@ -222,6 +226,7 @@ def _fetch_and_cache_model_size(model: str):
                     return size_b
         return None
     except Exception:
+        traceback.print_exc()
         return None
 
 
