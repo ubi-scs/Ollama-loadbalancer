@@ -61,6 +61,11 @@ def run_command(command):
         logger.error(f"An error occurred while running command '{' '.join(command)}': {e}")
         return -1, "", str(e)
 
+#api version
+@app.get("/api/version")
+def get_api_version():
+    return {"api_version": "1.0.0"}
+
 
 @app.get("/gpu/utilization")
 def get_gpu_utilization():
