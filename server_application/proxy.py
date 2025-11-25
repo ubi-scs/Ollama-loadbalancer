@@ -14,7 +14,10 @@ from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
 import requests
-from usage_utils import log_usage  # <-- Use the utility module
+try:
+    from usage_utils import log_usage  # <-- Use the utility module
+except ImportError:
+    from .usage_utils import log_usage
 
 USERS_FILE_PATH = "authorized_users.csv"
 CONFIG_FILE_PATH = "workers.csv"
@@ -32,6 +35,122 @@ _STATE_LOCK = threading.Lock()
 #   available_models:set[str], last_available_refresh:float
 # }
 _WORKERS = {}
+# New health probe thresholds (override via env vars)
+_HEALTH_FAIL_THRESHOLD = int(os.environ.get('HEALTH_FAIL_THRESHOLD', '2'))
+_HEALTH_SUCCESS_THRESHOLD = int(os.environ.get('HEALTH_SUCCESS_THRESHOLD', '1'))
+_HEALTH_PROBE_TIMEOUT = float(os.environ.get('HEALTH_PROBE_TIMEOUT', '3'))
+
+# Health logging helpers (reinserted)
+
+def _log_worker_health(name: str, outcome: str, reason_code: str, detail: str, enabled: bool, prev_healthy: bool, new_healthy: bool):
+    try:
+        ts = datetime.datetime.utcnow().isoformat() + 'Z'
+        print(f"{ts} worker_health name={name} enabled={enabled} healthy_transition={prev_healthy}->{new_healthy} outcome={outcome} reason={reason_code} detail={detail}")
+    except Exception as e:
+        print(f"Logging error for worker {name}: {e}")
+
+
+def _update_worker_health_in_csv(name: str, new_healthy: bool):
+    try:
+        df = _get_workers_df()
+        if 'name' not in df.columns:
+            return
+        if name not in set(df['name']):
+            return
+        df.loc[df['name'] == name, 'healthy'] = bool(new_healthy)
+        _save_workers_df(df)
+    except Exception as e:
+        print(f"Failed to update worker '{name}' health in CSV: {e}")
+
+
+def _ensure_health_counters(name: str):
+    with _STATE_LOCK:
+        if name in _WORKERS:
+            w = _WORKERS[name]
+            w.setdefault('health_failures', 0)
+            w.setdefault('health_successes', 0)
+            w.setdefault('last_health_probe', 0.0)
+
+
+def _probe_worker_health(name: str):
+    try:
+        df = _get_workers_df()
+    except Exception:
+        return
+    row = df[df['name'] == name]
+    if row.empty:
+        return
+    row = row.iloc[0]
+    enabled = bool(str(row.get('enabled', True)).strip().lower() == 'true') if isinstance(row.get('enabled', True), str) else bool(row.get('enabled', True))
+    prev_healthy = bool(str(row.get('healthy', True)).strip().lower() == 'true') if isinstance(row.get('healthy', True), str) else bool(row.get('healthy', True))
+    url = row.get('url')
+    if not isinstance(url, str) or not re.match(r'^https?://', url):
+        _log_worker_health(name, 'skip', 'probe_skip', 'invalid_url', enabled, prev_healthy, prev_healthy)
+        return
+    if not enabled:
+        _log_worker_health(name, 'skip', 'disabled', 'worker disabled', enabled, prev_healthy, prev_healthy)
+        return
+    _ensure_health_counters(name)
+    with _STATE_LOCK:
+        w = _WORKERS.get(name)
+        if not w:
+            return
+        last_probe = w.get('last_health_probe', 0.0)
+    now = time.time()
+    if now - last_probe < 0.5:  # allow more frequent during tests
+        return
+    success = False
+    detail = ''
+    reason = ''
+    try:
+        resp = requests.get(f"{url.rstrip('/')}/api/version", timeout=_HEALTH_PROBE_TIMEOUT)
+        if resp.status_code == 200:
+            success = True
+        else:
+            reason = 'http_error'
+            detail = f'status={resp.status_code}'
+    except requests.exceptions.Timeout:
+        reason = 'timeout'
+        detail = 'probe timeout'
+    except Exception as e:
+        reason = 'exception'
+        detail = str(e)
+    with _STATE_LOCK:
+        w = _WORKERS.get(name)
+        if not w:
+            return
+        w['last_health_probe'] = now
+        if success:
+            w['health_successes'] = int(w.get('health_successes', 0)) + 1
+            w['health_failures'] = 0
+        else:
+            w['health_failures'] = int(w.get('health_failures', 0)) + 1
+            w['health_successes'] = 0
+        failures = w['health_failures']
+        successes = w['health_successes']
+    new_healthy = prev_healthy
+    transitioned = False
+    if success and not prev_healthy and successes >= _HEALTH_SUCCESS_THRESHOLD:
+        new_healthy = True
+        transitioned = True
+        reason = 'restored'
+        detail = f'successes={successes}'
+    elif (not success) and prev_healthy and failures >= _HEALTH_FAIL_THRESHOLD:
+        new_healthy = False
+        transitioned = True
+        detail = f'failures={failures} {detail}'.strip()
+    if transitioned:
+        _update_worker_health_in_csv(name, new_healthy)
+        _refresh_worker_registry()
+    if success and not transitioned:
+        _log_worker_health(name, 'probe_success', 'still_healthy' if prev_healthy else 'warming', f'successes={successes}', enabled, prev_healthy, new_healthy)
+    elif success and transitioned:
+        _log_worker_health(name, 'state_change', 'restored', detail, enabled, prev_healthy, new_healthy)
+    elif (not success) and not transitioned:
+        _log_worker_health(name, 'probe_fail', reason or 'failure', f'failures={failures} {detail}'.strip(), enabled, prev_healthy, new_healthy)
+    else:
+        _log_worker_health(name, 'state_change', reason or 'became_unhealthy', detail, enabled, prev_healthy, new_healthy)
+
 
 def _abs_path(filename):
     return str(os.path.join(os.path.dirname(os.path.abspath(__file__)), filename))
@@ -847,9 +966,10 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 def _worker_state_refresher_loop(interval_seconds: int = 15, models_ttl_seconds: int = 30):
-    """Background loop to keep _WORKERS cache warm (models and VRAM).
+    """Background loop to keep _WORKERS cache warm (models and VRAM) and probe health.
     Periodically:
     - refresh the worker registry
+    - probe ALL workers (including unhealthy) for recovery
     - ensure VRAM totals are cached
     - refresh loaded models with a TTL
     - refresh available models with a TTL
@@ -857,6 +977,16 @@ def _worker_state_refresher_loop(interval_seconds: int = 15, models_ttl_seconds:
     while True:
         try:
             _refresh_worker_registry()
+            # Probe every worker listed in CSV (enabled & disabled) for state transitions / logging
+            try:
+                df = _get_workers_df()
+                for _, row in df.iterrows():
+                    name = row.get('name')
+                    if isinstance(name, str):
+                        _probe_worker_health(name)
+            except Exception as e_probe:
+                print(f"Health probe loop error: {e_probe}")
+
             names = _get_enabled_healthy_workers()
             for n in names:
                 try:
