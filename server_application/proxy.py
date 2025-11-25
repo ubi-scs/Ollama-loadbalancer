@@ -110,6 +110,7 @@ def _probe_worker_health(name: str):
         else:
             reason = 'http_error'
             detail = f'status={resp.status_code}'
+            print(f"Health probe for worker '{name}' returned status {resp.status_code}: response={resp}, content={resp.content}")
     except requests.exceptions.Timeout:
         traceback.print_exc()
         reason = 'timeout'
