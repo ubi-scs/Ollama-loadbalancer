@@ -277,8 +277,11 @@ def _coerce_bool(val, default=True):
 def check_worker_availability(url):
     try:
         if not isinstance(url, str) or not re.match(r'^https?://', url):
+            print(f"Health check skipped: invalid url '{url}'")
             return False
-        resp = requests.get(f"{url.rstrip('/')}/api/version", timeout=3)
+        # Use the URL exactly as configured; include API key header
+        target = f"{url.rstrip('/')}/api/version"
+        resp = requests.get(target, headers={"x-api-key": OLLAMA_HELPER_API_KEY}, timeout=3)
         if resp.status_code == 200:
             # basic sanity check on json
             try:
@@ -286,8 +289,14 @@ def check_worker_availability(url):
             except Exception:
                 pass
             return True
+        else:
+            print(f"Health check failed for {target}: HTTP {resp.status_code}")
+            return False
+    except requests.exceptions.Timeout:
+        print(f"Health check timeout for {url}")
         return False
-    except Exception:
+    except Exception as e:
+        print(f"Health check exception for {url}: {e}")
         return False
 
 
@@ -307,6 +316,7 @@ def health_monitor_loop(interval_seconds=60):
                 # Only probe enabled workers; disabled ones are marked healthy by default to avoid hiding them
                 new_healthy = check_worker_availability(url) if enabled else prev_healthy
                 if bool(prev_healthy) != bool(new_healthy):
+                    print(f"Health state change for {row.get('name')}: {prev_healthy} -> {new_healthy}")
                     df.at[idx, 'healthy'] = bool(new_healthy)
                     changed = True
             if changed:
