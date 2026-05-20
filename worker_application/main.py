@@ -23,6 +23,8 @@ from fastapi import (
 )
 from typing import Optional
 
+from worker_application.activity_monitor import ActivityMonitor
+
 try:
     import httpx
 except ImportError:
@@ -57,6 +59,8 @@ _ollama_update_lock = threading.Lock()
 _ollama_update_status = OllamaUpdateStatus.IDLE
 _ollama_update_message = ""
 _ollama_update_timestamp = ""
+
+_activity_monitor = ActivityMonitor()
 
 
 async def verify_api_key(
@@ -124,7 +128,10 @@ def _get_ollama_update_status():
 
 @app.get("/api/version")
 def get_api_version():
-    return {"api_version": "1.0.0"}
+    return {
+        "api_version": "1.0.0",
+        "disabled": _activity_monitor.is_disabled(),
+    }
 
 
 @app.get("/gpu/utilization")
@@ -376,6 +383,65 @@ def get_self_update_status():
         pass
 
     return {"status": "unknown", "message": "Cannot reach watchdog", "timestamp": ""}
+
+
+@app.on_event("startup")
+def _start_activity_monitor():
+    _activity_monitor.start()
+
+
+@app.on_event("shutdown")
+def _stop_activity_monitor():
+    _activity_monitor.stop()
+
+
+@app.get("/worker/activity-status")
+def get_activity_status():
+    return _activity_monitor.get_status()
+
+
+@app.post("/worker/trigger-update", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_self_update(background_tasks: BackgroundTasks):
+    if httpx is None:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="httpx not available, cannot forward to watchdog.",
+        )
+
+    watchdog_trigger_url = (
+        f"http://{WATCHDOG_HOST}:{WATCHDOG_PORT}/watchdog/trigger-update"
+    )
+    api_key = os.getenv(API_KEY_NAME, "")
+
+    try:
+        resp = httpx.post(
+            watchdog_trigger_url,
+            headers={"X-API-KEY": api_key},
+            timeout=30,
+        )
+        if resp.status_code == status.HTTP_202_ACCEPTED:
+            return {"message": "Worker self-update triggered via watchdog."}
+        if resp.status_code == status.HTTP_409_CONFLICT:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Update already in progress.",
+            )
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=resp.json().get("detail", "Watchdog rejected trigger request."),
+        )
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Cannot connect to watchdog service.",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error forwarding trigger to watchdog: {e}",
+        )
 
 
 if __name__ == "__main__":

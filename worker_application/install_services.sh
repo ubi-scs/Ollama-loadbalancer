@@ -12,6 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$SCRIPT_DIR"
+PARENT_DIR="$(cd "$APP_DIR/.." && pwd)"
 VENV_DIR="$APP_DIR/venv"
 
 ENV_FILE="$APP_DIR/ollama_worker.env"
@@ -61,7 +62,7 @@ After=network.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=${APP_DIR}
+WorkingDirectory=${PARENT_DIR}
 ExecStart=${VENV_DIR}/bin/python -m uvicorn worker_application.main:app --host \${WORKER_HOST} --port \${WORKER_PORT}
 EnvironmentFile=${ENV_FILE}
 Restart=always
@@ -85,7 +86,7 @@ After=network.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=${APP_DIR}
+WorkingDirectory=${PARENT_DIR}
 ExecStart=${VENV_DIR}/bin/python -m uvicorn worker_application.watchdog:app --host \${WATCHDOG_HOST} --port \${WATCHDOG_PORT}
 EnvironmentFile=${ENV_FILE}
 Restart=always

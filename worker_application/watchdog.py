@@ -511,9 +511,106 @@ async def trigger_update(
     return {"message": "Self-update process has been started in the background."}
 
 
+@app.post("/watchdog/trigger-update", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_update_from_worker(background_tasks: BackgroundTasks):
+    if not worker_process:
+        raise HTTPException(
+            status_code=500, detail="Worker process not managed by watchdog."
+        )
+
+    with _update_lock:
+        if _update_status == UpdateStatus.IN_PROGRESS:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Update already in progress.",
+            )
+
+    logger.info(
+        "Received trigger-update request (no archive). Performing git-based self-update."
+    )
+
+    _set_update_status(UpdateStatus.IN_PROGRESS, "Self-update triggered (no archive)")
+
+    background_tasks.add_task(_perform_git_self_update, worker_process)
+    return {"message": "Self-update process has been triggered in the background."}
+
+
 @app.get("/watchdog/update/status")
 def get_update_status():
     return _get_update_status()
+
+
+def _perform_git_self_update(worker_proc: WorkerProcess):
+    logger.info("Starting git-based self-update...")
+    _set_update_status(UpdateStatus.IN_PROGRESS, "Self-update: checking git repository")
+
+    worker_dir = str(WORKER_DIR)
+
+    if not os.path.isdir(os.path.join(worker_dir, ".git")):
+        logger.error("Worker directory is not a git repository.")
+        _set_update_status(
+            UpdateStatus.FAILED,
+            "Self-update failed: worker directory is not a git repository",
+        )
+        return
+
+    _set_update_status(UpdateStatus.IN_PROGRESS, "Self-update: pulling latest changes")
+    git_pull_code, git_pull_out, git_pull_err = run_command(
+        ["git", "pull", "--rebase"], timeout=120, cwd=worker_dir
+    )
+
+    if git_pull_code != 0:
+        logger.error(f"Git pull failed: {git_pull_err}")
+        _set_update_status(
+            UpdateStatus.FAILED,
+            f"Self-update failed: git pull error: {git_pull_err}",
+        )
+        return
+
+    changes_pulled = (
+        git_pull_out.strip() != "" and "Already up to date" not in git_pull_out
+    )
+
+    if not changes_pulled:
+        logger.info("No changes pulled. Worker is up to date.")
+        _set_update_status(UpdateStatus.SUCCESS, "Worker is already up to date")
+        return
+
+    _set_update_status(UpdateStatus.IN_PROGRESS, "Self-update: installing dependencies")
+    pip_code, pip_out, pip_err = run_command(
+        [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+        timeout=300,
+        cwd=worker_dir,
+    )
+
+    if pip_code != 0:
+        logger.warning(f"Pip install failed (non-fatal): {pip_err}")
+
+    _set_update_status(UpdateStatus.IN_PROGRESS, "Self-update: restarting worker")
+    worker_proc.stop()
+    started = worker_proc.start(timeout=WORKER_STARTUP_TIMEOUT)
+
+    if not started:
+        logger.error("Worker failed to start after git update.")
+        _set_update_status(
+            UpdateStatus.FAILED,
+            "Self-update failed: worker would not start after update",
+        )
+        return
+
+    _set_update_status(UpdateStatus.IN_PROGRESS, "Self-update: verifying worker health")
+    healthy = worker_proc.is_healthy()
+
+    if healthy:
+        logger.info("Worker is healthy after git-based self-update.")
+        _set_update_status(
+            UpdateStatus.SUCCESS, "Self-update completed successfully via git pull"
+        )
+    else:
+        logger.error("Worker is not healthy after git update.")
+        _set_update_status(
+            UpdateStatus.FAILED, "Self-update failed: worker unhealthy after update"
+        )
 
 
 @app.post("/watchdog/worker/stop")

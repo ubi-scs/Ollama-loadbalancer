@@ -701,3 +701,46 @@ class TestWorkerProcess:
 
         assert wp.is_healthy() is False
         assert wp.is_running is False
+
+
+# ---------------------------------------------------------------------------
+# Activity monitor integration tests (real running instance)
+# ---------------------------------------------------------------------------
+
+
+class TestActivityMonitorAPI:
+    def test_api_version_includes_disabled_field(self, worker_instance):
+        resp = worker_instance["client"].get("/api/version")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "api_version" in data
+        assert "disabled" in data
+        assert isinstance(data["disabled"], bool)
+
+    def test_activity_status_endpoint_exists(self, worker_instance):
+        resp = worker_instance["client"].get("/worker/activity-status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "disabled" in data
+        assert "disabled_until" in data
+        assert "remaining_seconds" in data
+        assert "user_active" in data
+        assert "gpu_vram_contended" in data
+        assert "last_check_time" in data
+        assert "last_disable_reason" in data
+
+    def test_activity_status_initial_state(self, worker_instance):
+        resp = worker_instance["client"].get("/worker/activity-status")
+        data = resp.json()
+        assert data["disabled"] is False
+        assert data["remaining_seconds"] == 0
+        assert data["disabled_until"] == 0
+
+    def test_activity_status_reflects_in_version(self, worker_instance):
+        version_resp = worker_instance["client"].get("/api/version")
+        version_data = version_resp.json()
+
+        activity_resp = worker_instance["client"].get("/worker/activity-status")
+        activity_data = activity_resp.json()
+
+        assert version_data["disabled"] == activity_data["disabled"]

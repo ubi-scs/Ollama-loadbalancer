@@ -14,6 +14,7 @@ from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
 import requests
+
 try:
     from usage_utils import log_usage  # <-- Use the utility module
 except ImportError:
@@ -36,16 +37,27 @@ _STATE_LOCK = threading.Lock()
 # }
 _WORKERS = {}
 # New health probe thresholds (override via env vars)
-_HEALTH_FAIL_THRESHOLD = int(os.environ.get('HEALTH_FAIL_THRESHOLD', '2'))
-_HEALTH_SUCCESS_THRESHOLD = int(os.environ.get('HEALTH_SUCCESS_THRESHOLD', '1'))
-_HEALTH_PROBE_TIMEOUT = float(os.environ.get('HEALTH_PROBE_TIMEOUT', '3'))
+_HEALTH_FAIL_THRESHOLD = int(os.environ.get("HEALTH_FAIL_THRESHOLD", "2"))
+_HEALTH_SUCCESS_THRESHOLD = int(os.environ.get("HEALTH_SUCCESS_THRESHOLD", "1"))
+_HEALTH_PROBE_TIMEOUT = float(os.environ.get("HEALTH_PROBE_TIMEOUT", "3"))
 
 # Health logging helpers (reinserted)
 
-def _log_worker_health(name: str, outcome: str, reason_code: str, detail: str, enabled: bool, prev_healthy: bool, new_healthy: bool):
+
+def _log_worker_health(
+    name: str,
+    outcome: str,
+    reason_code: str,
+    detail: str,
+    enabled: bool,
+    prev_healthy: bool,
+    new_healthy: bool,
+):
     try:
-        ts = datetime.datetime.utcnow().isoformat() + 'Z'
-        print(f"{ts} worker_health name={name} enabled={enabled} healthy_transition={prev_healthy}->{new_healthy} outcome={outcome} reason={reason_code} detail={detail}")
+        ts = datetime.datetime.utcnow().isoformat() + "Z"
+        print(
+            f"{ts} worker_health name={name} enabled={enabled} healthy_transition={prev_healthy}->{new_healthy} outcome={outcome} reason={reason_code} detail={detail}"
+        )
     except Exception as e:
         print(f"Logging error for worker {name}: {e}")
 
@@ -53,11 +65,11 @@ def _log_worker_health(name: str, outcome: str, reason_code: str, detail: str, e
 def _update_worker_health_in_csv(name: str, new_healthy: bool):
     try:
         df = _get_workers_df()
-        if 'name' not in df.columns:
+        if "name" not in df.columns:
             return
-        if name not in set(df['name']):
+        if name not in set(df["name"]):
             return
-        df.loc[df['name'] == name, 'healthy'] = bool(new_healthy)
+        df.loc[df["name"] == name, "healthy"] = bool(new_healthy)
         _save_workers_df(df)
     except Exception as e:
         print(f"Failed to update worker '{name}' health in CSV: {e}")
@@ -67,9 +79,26 @@ def _ensure_health_counters(name: str):
     with _STATE_LOCK:
         if name in _WORKERS:
             w = _WORKERS[name]
-            w.setdefault('health_failures', 0)
-            w.setdefault('health_successes', 0)
-            w.setdefault('last_health_probe', 0.0)
+            w.setdefault("health_failures", 0)
+            w.setdefault("health_successes", 0)
+            w.setdefault("last_health_probe", 0.0)
+
+
+def _fetch_worker_activity_status(name: str, url: str):
+    try:
+        helper_url = (
+            f"{url.replace('11434', '18034').rstrip('/')}/worker/activity-status"
+        )
+        api_key = os.environ.get("OLLAMA_HELPER_API_KEY", "")
+        headers = {}
+        if api_key:
+            headers["x-api-key"] = api_key
+        resp = requests.get(helper_url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+    return None
 
 
 def _probe_worker_health(name: str):
@@ -78,82 +107,143 @@ def _probe_worker_health(name: str):
     except Exception:
         traceback.print_exc()
         return
-    row = df[df['name'] == name]
+    row = df[df["name"] == name]
     if row.empty:
         return
     row = row.iloc[0]
-    enabled = bool(str(row.get('enabled', True)).strip().lower() == 'true') if isinstance(row.get('enabled', True), str) else bool(row.get('enabled', True))
-    prev_healthy = bool(str(row.get('healthy', True)).strip().lower() == 'true') if isinstance(row.get('healthy', True), str) else bool(row.get('healthy', True))
-    url = row.get('url')
-    if not isinstance(url, str) or not re.match(r'^https?://', url):
-        _log_worker_health(name, 'skip', 'probe_skip', 'invalid_url', enabled, prev_healthy, prev_healthy)
+    enabled = (
+        bool(str(row.get("enabled", True)).strip().lower() == "true")
+        if isinstance(row.get("enabled", True), str)
+        else bool(row.get("enabled", True))
+    )
+    prev_healthy = (
+        bool(str(row.get("healthy", True)).strip().lower() == "true")
+        if isinstance(row.get("healthy", True), str)
+        else bool(row.get("healthy", True))
+    )
+    url = row.get("url")
+    if not isinstance(url, str) or not re.match(r"^https?://", url):
+        _log_worker_health(
+            name,
+            "skip",
+            "probe_skip",
+            "invalid_url",
+            enabled,
+            prev_healthy,
+            prev_healthy,
+        )
         return
     if not enabled:
-        _log_worker_health(name, 'skip', 'disabled', 'worker disabled', enabled, prev_healthy, prev_healthy)
+        _log_worker_health(
+            name,
+            "skip",
+            "disabled",
+            "worker disabled",
+            enabled,
+            prev_healthy,
+            prev_healthy,
+        )
         return
     _ensure_health_counters(name)
     with _STATE_LOCK:
         w = _WORKERS.get(name)
         if not w:
             return
-        last_probe = w.get('last_health_probe', 0.0)
+        last_probe = w.get("last_health_probe", 0.0)
     now = time.time()
     if now - last_probe < 0.5:  # allow more frequent during tests
         return
     success = False
-    detail = ''
-    reason = ''
+    detail = ""
+    reason = ""
+    activity_disabled = False
     try:
-        resp = requests.get(f"{url.rstrip('/')}/api/version", timeout=_HEALTH_PROBE_TIMEOUT)
+        resp = requests.get(
+            f"{url.rstrip('/')}/api/version", timeout=_HEALTH_PROBE_TIMEOUT
+        )
         if resp.status_code == 200:
             success = True
+            try:
+                version_data = resp.json()
+                activity_disabled = bool(version_data.get("disabled", False))
+            except Exception:
+                pass
         else:
-            reason = 'http_error'
-            detail = f'status={resp.status_code}'
-            print(f"Health probe for worker '{name}', url: {url.rstrip('/')}/api/version , returned status {resp.status_code}: response={resp}, content={resp.content}")
+            reason = "http_error"
+            detail = f"status={resp.status_code}"
+            print(
+                f"Health probe for worker '{name}', url: {url.rstrip('/')}/api/version , returned status {resp.status_code}: response={resp}, content={resp.content}"
+            )
     except requests.exceptions.Timeout:
         traceback.print_exc()
-        reason = 'timeout'
-        detail = 'probe timeout'
+        reason = "timeout"
+        detail = "probe timeout"
     except Exception as e:
         traceback.print_exc()
-        reason = 'exception'
+        reason = "exception"
         detail = str(e)
     with _STATE_LOCK:
         w = _WORKERS.get(name)
         if not w:
             return
-        w['last_health_probe'] = now
+        w["last_health_probe"] = now
+        w["activity_disabled"] = activity_disabled
         if success:
-            w['health_successes'] = int(w.get('health_successes', 0)) + 1
-            w['health_failures'] = 0
+            w["health_successes"] = int(w.get("health_successes", 0)) + 1
+            w["health_failures"] = 0
         else:
-            w['health_failures'] = int(w.get('health_failures', 0)) + 1
-            w['health_successes'] = 0
-        failures = w['health_failures']
-        successes = w['health_successes']
+            w["health_failures"] = int(w.get("health_failures", 0)) + 1
+            w["health_successes"] = 0
+        failures = w["health_failures"]
+        successes = w["health_successes"]
     new_healthy = prev_healthy
     transitioned = False
     if success and not prev_healthy and successes >= _HEALTH_SUCCESS_THRESHOLD:
         new_healthy = True
         transitioned = True
-        reason = 'restored'
-        detail = f'successes={successes}'
+        reason = "restored"
+        detail = f"successes={successes}"
     elif (not success) and prev_healthy and failures >= _HEALTH_FAIL_THRESHOLD:
         new_healthy = False
         transitioned = True
-        detail = f'failures={failures} {detail}'.strip()
+        detail = f"failures={failures} {detail}".strip()
     if transitioned:
         _update_worker_health_in_csv(name, new_healthy)
         _refresh_worker_registry()
     if success and not transitioned:
-        _log_worker_health(name, 'probe_success', 'still_healthy' if prev_healthy else 'warming', f'successes={successes}', enabled, prev_healthy, new_healthy)
+        _log_worker_health(
+            name,
+            "probe_success",
+            "still_healthy" if prev_healthy else "warming",
+            f"successes={successes}",
+            enabled,
+            prev_healthy,
+            new_healthy,
+        )
     elif success and transitioned:
-        _log_worker_health(name, 'state_change', 'restored', detail, enabled, prev_healthy, new_healthy)
+        _log_worker_health(
+            name, "state_change", "restored", detail, enabled, prev_healthy, new_healthy
+        )
     elif (not success) and not transitioned:
-        _log_worker_health(name, 'probe_fail', reason or 'failure', f'failures={failures} {detail}'.strip(), enabled, prev_healthy, new_healthy)
+        _log_worker_health(
+            name,
+            "probe_fail",
+            reason or "failure",
+            f"failures={failures} {detail}".strip(),
+            enabled,
+            prev_healthy,
+            new_healthy,
+        )
     else:
-        _log_worker_health(name, 'state_change', reason or 'became_unhealthy', detail, enabled, prev_healthy, new_healthy)
+        _log_worker_health(
+            name,
+            "state_change",
+            reason or "became_unhealthy",
+            detail,
+            enabled,
+            prev_healthy,
+            new_healthy,
+        )
 
 
 def _abs_path(filename):
@@ -163,9 +253,9 @@ def _abs_path(filename):
 def _ensure_model_sizes_file():
     path = _abs_path(MODEL_SIZES_FILE_PATH)
     if not os.path.exists(path):
-        with open(path, 'w', newline='') as f:
+        with open(path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(['model', 'size_billion'])
+            writer.writerow(["model", "size_billion"])
 
 
 def _load_model_sizes():
@@ -175,7 +265,7 @@ def _load_model_sizes():
     if not df.empty:
         for _, row in df.iterrows():
             try:
-                sizes[str(row['model'])] = float(row['size_billion'])
+                sizes[str(row["model"])] = float(row["size_billion"])
             except Exception:
                 traceback.print_exc()
                 continue
@@ -187,9 +277,9 @@ def _save_model_size(model: str, size_billion: float):
     sizes[model] = size_billion
     # atomic-ish write
     tmp_path = _abs_path(MODEL_SIZES_FILE_PATH) + ".tmp"
-    with open(tmp_path, 'w', newline='') as f:
+    with open(tmp_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(['model', 'size_billion'])
+        writer.writerow(["model", "size_billion"])
         for m, s in sizes.items():
             writer.writerow([m, s])
     os.replace(tmp_path, _abs_path(MODEL_SIZES_FILE_PATH))
@@ -207,21 +297,23 @@ def _fetch_and_cache_model_size(model: str):
         # Use the first healthy backend to ask about the model
         with _STATE_LOCK:
             n = names[0]
-            url = _WORKERS.get(n, {}).get('url')
+            url = _WORKERS.get(n, {}).get("url")
         if not url:
             return None
-        resp = requests.post(f"{url.rstrip('/')}/api/show", json={"model": model}, timeout=5)
+        resp = requests.post(
+            f"{url.rstrip('/')}/api/show", json={"model": model}, timeout=5
+        )
         if resp.status_code != 200:
             return None
         data = resp.json() or {}
-        details = data.get('details') or {}
-        param_size = details.get('parameter_size') or details.get('parameter_size_str')
+        details = data.get("details") or {}
+        param_size = details.get("parameter_size") or details.get("parameter_size_str")
         if isinstance(param_size, str):
             m = re.search(r"(?i)(\d+(?:\.\d+)?)\s*([bm])", param_size.strip())
             if m:
                 val = float(m.group(1))
                 unit = m.group(2).lower()
-                size_b = val if unit == 'b' else val / 1000.0
+                size_b = val if unit == "b" else val / 1000.0
                 if size_b > 0:
                     _save_model_size(model, size_b)
                     return size_b
@@ -245,9 +337,9 @@ def _parse_model_size_from_string(model: str):
     except ValueError:
         return None
     unit = m.group(2).lower()
-    if unit == 'b':
+    if unit == "b":
         return value
-    if unit == 'm':
+    if unit == "m":
         return value / 1000.0
     return None
 
@@ -271,16 +363,16 @@ def _estimate_required_vram_mb(size_billion: float | None):
 
 def _vram_tier(total_mb: int | None):
     if total_mb is None:
-        return 'unknown'
+        return "unknown"
     if total_mb < 11000:
-        return '8-10GB'
+        return "8-10GB"
     if total_mb < 18000:
-        return '12-16GB'
+        return "12-16GB"
     if total_mb < 30000:
-        return '24GB'
+        return "24GB"
     if total_mb < 60000:
-        return '48GB'
-    return '80GB+'
+        return "48GB"
+    return "80GB+"
 
 
 def _get_workers_df():
@@ -289,7 +381,7 @@ def _get_workers_df():
 
 def _save_workers_df(df: pd.DataFrame):
     tmp = _abs_path(CONFIG_FILE_PATH) + ".tmp"
-    df.to_csv(tmp, index=False, encoding='utf-8')
+    df.to_csv(tmp, index=False, encoding="utf-8")
     os.replace(tmp, _abs_path(CONFIG_FILE_PATH))
 
 
@@ -299,36 +391,52 @@ def _refresh_worker_registry():
     with _STATE_LOCK:
         names_in_csv = set()
         for _, row in df.iterrows():
-            name = row.get('name')
+            name = row.get("name")
             if not isinstance(name, str):
                 continue
-            url = row.get('url')
-            enabled = bool(str(row.get('enabled', True)).strip().lower() == 'true') if isinstance(row.get('enabled', True), str) else bool(row.get('enabled', True))
-            healthy = bool(str(row.get('healthy', True)).strip().lower() == 'true') if isinstance(row.get('healthy', True), str) else bool(row.get('healthy', True))
-            vram_val = int(row.get('vram_total_mb')) if 'vram_total_mb' in df.columns and pd.notna(row.get('vram_total_mb')) else None
+            url = row.get("url")
+            enabled = (
+                bool(str(row.get("enabled", True)).strip().lower() == "true")
+                if isinstance(row.get("enabled", True), str)
+                else bool(row.get("enabled", True))
+            )
+            healthy = (
+                bool(str(row.get("healthy", True)).strip().lower() == "true")
+                if isinstance(row.get("healthy", True), str)
+                else bool(row.get("healthy", True))
+            )
+            vram_val = (
+                int(row.get("vram_total_mb"))
+                if "vram_total_mb" in df.columns and pd.notna(row.get("vram_total_mb"))
+                else None
+            )
 
             if name not in _WORKERS:
                 _WORKERS[name] = {
-                    'url': url,
-                    'queue': Queue(),
-                    'vram_total_mb': vram_val,
-                    'loaded_models': set(),
-                    'last_models_refresh': 0.0,
-                    'available_models': set(),
-                    'last_available_refresh': 0.0,
-                    'enabled': enabled,
-                    'healthy': healthy,
+                    "url": url,
+                    "queue": Queue(),
+                    "vram_total_mb": vram_val,
+                    "loaded_models": set(),
+                    "last_models_refresh": 0.0,
+                    "available_models": set(),
+                    "last_available_refresh": 0.0,
+                    "enabled": enabled,
+                    "healthy": healthy,
+                    "activity_disabled": False,
+                    "activity_status": {},
                 }
             else:
-                _WORKERS[name]['url'] = url
+                _WORKERS[name]["url"] = url
                 # carry queue
-                if 'queue' not in _WORKERS[name] or not isinstance(_WORKERS[name]['queue'], Queue):
-                    _WORKERS[name]['queue'] = Queue()
+                if "queue" not in _WORKERS[name] or not isinstance(
+                    _WORKERS[name]["queue"], Queue
+                ):
+                    _WORKERS[name]["queue"] = Queue()
                 # Update VRAM cached
                 if vram_val is not None:
-                    _WORKERS[name]['vram_total_mb'] = vram_val
-                _WORKERS[name]['enabled'] = enabled
-                _WORKERS[name]['healthy'] = healthy
+                    _WORKERS[name]["vram_total_mb"] = vram_val
+                _WORKERS[name]["enabled"] = enabled
+                _WORKERS[name]["healthy"] = healthy
 
             names_in_csv.add(name)
 
@@ -344,30 +452,42 @@ def _fetch_and_cache_worker_vram_if_missing(name: str):
         w = _WORKERS.get(name)
     if not w:
         return
-    if w.get('vram_total_mb'):
+    if w.get("vram_total_mb"):
         return
     # Load CSV row to check enabled+healthy and URL
     df = _get_workers_df()
-    row = df[df['name'] == name]
+    row = df[df["name"] == name]
     if row.empty:
         return
     row = row.iloc[0]
-    enabled = bool(str(row.get('enabled', True)).strip().lower() == 'true') if isinstance(row.get('enabled', True), str) else bool(row.get('enabled', True))
-    healthy = bool(str(row.get('healthy', True)).strip().lower() == 'true') if isinstance(row.get('healthy', True), str) else bool(row.get('healthy', True))
+    enabled = (
+        bool(str(row.get("enabled", True)).strip().lower() == "true")
+        if isinstance(row.get("enabled", True), str)
+        else bool(row.get("enabled", True))
+    )
+    healthy = (
+        bool(str(row.get("healthy", True)).strip().lower() == "true")
+        if isinstance(row.get("healthy", True), str)
+        else bool(row.get("healthy", True))
+    )
     if not (enabled and healthy):
         return
-    url = str(row.get('url'))
+    url = str(row.get("url"))
     try:
-        helper_url = f"{url.replace('11434','18034').rstrip('/')}/gpu/vram"
-        resp = requests.get(helper_url, headers={"x-api-key": os.environ.get("OLLAMA_HELPER_API_KEY", "")}, timeout=5)
+        helper_url = f"{url.replace('11434', '18034').rstrip('/')}/gpu/vram"
+        resp = requests.get(
+            helper_url,
+            headers={"x-api-key": os.environ.get("OLLAMA_HELPER_API_KEY", "")},
+            timeout=5,
+        )
         if resp.status_code == 200:
             data = resp.json()
-            total = int(data.get('vram_total_mb', 0))
+            total = int(data.get("vram_total_mb", 0))
             if total > 0:
                 with _STATE_LOCK:
-                    _WORKERS[name]['vram_total_mb'] = total
+                    _WORKERS[name]["vram_total_mb"] = total
                 # Persist to CSV
-                df.loc[df['name'] == name, 'vram_total_mb'] = total
+                df.loc[df["name"] == name, "vram_total_mb"] = total
                 _save_workers_df(df)
     except Exception:
         pass
@@ -379,26 +499,29 @@ def _refresh_loaded_models(name: str, ttl_seconds: int = 30):
         w = _WORKERS.get(name)
         if not w:
             return set()
-        if now - w.get('last_models_refresh', 0) < ttl_seconds and w.get('loaded_models') is not None:
-            return set(w['loaded_models'])
-        url = w.get('url')
+        if (
+            now - w.get("last_models_refresh", 0) < ttl_seconds
+            and w.get("loaded_models") is not None
+        ):
+            return set(w["loaded_models"])
+        url = w.get("url")
     try:
         resp = requests.get(f"{url.rstrip('/')}/api/ps", timeout=4)
         models = set()
         if resp.status_code == 200:
             data = resp.json()
-            for m in data.get('models', []) or []:
-                n = m.get('name')
+            for m in data.get("models", []) or []:
+                n = m.get("name")
                 if isinstance(n, str) and n:
                     models.add(n)
         with _STATE_LOCK:
             if name in _WORKERS:
-                _WORKERS[name]['loaded_models'] = models
-                _WORKERS[name]['last_models_refresh'] = now
+                _WORKERS[name]["loaded_models"] = models
+                _WORKERS[name]["last_models_refresh"] = now
         return models
     except Exception:
         with _STATE_LOCK:
-            return set(_WORKERS.get(name, {}).get('loaded_models') or set())
+            return set(_WORKERS.get(name, {}).get("loaded_models") or set())
 
 
 def _refresh_available_models(name: str, ttl_seconds: int = 60):
@@ -407,9 +530,12 @@ def _refresh_available_models(name: str, ttl_seconds: int = 60):
         w = _WORKERS.get(name)
         if not w:
             return set()
-        if now - w.get('last_available_refresh', 0) < ttl_seconds and w.get('available_models') is not None:
-            return set(w['available_models'])
-        url = w.get('url')
+        if (
+            now - w.get("last_available_refresh", 0) < ttl_seconds
+            and w.get("available_models") is not None
+        ):
+            return set(w["available_models"])
+        url = w.get("url")
     try:
         resp = requests.get(f"{url.rstrip('/')}/api/tags", timeout=5)
         available = set()
@@ -417,25 +543,25 @@ def _refresh_available_models(name: str, ttl_seconds: int = 60):
             data = resp.json()
             # Newer ollama: {"models":[{"name":"..."}, ...]}
             models_list = []
-            if isinstance(data, dict) and 'models' in data:
-                models_list = data.get('models') or []
+            if isinstance(data, dict) and "models" in data:
+                models_list = data.get("models") or []
             elif isinstance(data, list):
                 models_list = data
             for m in models_list:
                 try:
-                    n = m.get('name') if isinstance(m, dict) else None
+                    n = m.get("name") if isinstance(m, dict) else None
                     if isinstance(n, str) and n:
                         available.add(n)
                 except Exception:
                     continue
         with _STATE_LOCK:
             if name in _WORKERS:
-                _WORKERS[name]['available_models'] = available
-                _WORKERS[name]['last_available_refresh'] = now
+                _WORKERS[name]["available_models"] = available
+                _WORKERS[name]["last_available_refresh"] = now
         return available
     except Exception:
         with _STATE_LOCK:
-            return set(_WORKERS.get(name, {}).get('available_models') or set())
+            return set(_WORKERS.get(name, {}).get("available_models") or set())
 
 
 def _get_available_models_for_enabled_healthy(force_refresh: bool = False):
@@ -448,7 +574,7 @@ def _get_available_models_for_enabled_healthy(force_refresh: bool = False):
             if force_refresh:
                 _refresh_available_models(n, ttl_seconds=0)
             with _STATE_LOCK:
-                models |= set(_WORKERS.get(n, {}).get('available_models') or set())
+                models |= set(_WORKERS.get(n, {}).get("available_models") or set())
         except Exception:
             continue
     return sorted(models)
@@ -459,11 +585,23 @@ def _get_enabled_healthy_workers():
     candidates = []
     for _, row in df.iterrows():
         try:
-            enabled = bool(str(row.get('enabled', True)).strip().lower() == 'true') if isinstance(row.get('enabled', True), str) else bool(row.get('enabled', True))
-            healthy = bool(str(row.get('healthy', True)).strip().lower() == 'true') if isinstance(row.get('healthy', True), str) else bool(row.get('healthy', True))
+            enabled = (
+                bool(str(row.get("enabled", True)).strip().lower() == "true")
+                if isinstance(row.get("enabled", True), str)
+                else bool(row.get("enabled", True))
+            )
+            healthy = (
+                bool(str(row.get("healthy", True)).strip().lower() == "true")
+                if isinstance(row.get("healthy", True), str)
+                else bool(row.get("healthy", True))
+            )
             if not (enabled and healthy):
                 continue
-            name = row['name']
+            name = row["name"]
+            with _STATE_LOCK:
+                w = _WORKERS.get(name)
+                if w and w.get("activity_disabled"):
+                    continue
             candidates.append(name)
         except Exception:
             continue
@@ -528,12 +666,14 @@ def _choose_backend_for_model(model: str):
                 w = _WORKERS.get(n)
                 if not w:
                     continue
-                url = w.get('url')
-                q = w.get('queue')
-                vram = w.get('vram_total_mb')  # may be None if not yet discovered
-                loaded_cached = set(w.get('loaded_models') or [])
-                available_cached = set(w.get('available_models') or [])
-                info.append((n, url, q, vram, loaded_cached, _vram_tier(vram), available_cached))
+                url = w.get("url")
+                q = w.get("queue")
+                vram = w.get("vram_total_mb")  # may be None if not yet discovered
+                loaded_cached = set(w.get("loaded_models") or [])
+                available_cached = set(w.get("available_models") or [])
+                info.append(
+                    (n, url, q, vram, loaded_cached, _vram_tier(vram), available_cached)
+                )
         return info
 
     workers_info = _snapshot()
@@ -563,7 +703,11 @@ def _choose_backend_for_model(model: str):
     # 3) If no worker fits by VRAM, fallback to one that has the model available (or any) with highest VRAM & lowest queue.
 
     if model:
-        loaded_workers = [(n, url, q, vram, tier) for (n, url, q, vram, loaded, tier, avail) in workers_info if model in loaded]
+        loaded_workers = [
+            (n, url, q, vram, tier)
+            for (n, url, q, vram, loaded, tier, avail) in workers_info
+            if model in loaded
+        ]
     else:
         loaded_workers = []
 
@@ -571,13 +715,24 @@ def _choose_backend_for_model(model: str):
         empties = [w for w in loaded_workers if w[2].qsize() == 0]
         if empties:
             # Sort by VRAM ascending (so we don't waste high VRAM node if a smaller one suffices), then queue size
-            chosen = sorted(empties, key=lambda x: ((x[3] or 1_000_000), x[2].qsize()))[0]
+            chosen = sorted(empties, key=lambda x: ((x[3] or 1_000_000), x[2].qsize()))[
+                0
+            ]
             return chosen
         # Try same-tier empty without any models loaded yet but with model available (opportunity placement)
         tiers = {w[4] for w in loaded_workers}
-        same_tier_candidates = [w for w in workers_info if w[5] in tiers and len(w[4]) == 0 and w[2].qsize() == 0 and (not model or model in w[6])]
+        same_tier_candidates = [
+            w
+            for w in workers_info
+            if w[5] in tiers
+            and len(w[4]) == 0
+            and w[2].qsize() == 0
+            and (not model or model in w[6])
+        ]
         if same_tier_candidates:
-            chosen = sorted(same_tier_candidates, key=lambda x: ((x[3] or 1_000_000), x[2].qsize()))[0]
+            chosen = sorted(
+                same_tier_candidates, key=lambda x: ((x[3] or 1_000_000), x[2].qsize())
+            )[0]
             return (chosen[0], chosen[1], chosen[2], chosen[3], chosen[5])
         # Fallback: lowest queue among loaded
         chosen = sorted(loaded_workers, key=lambda x: x[2].qsize())[0]
@@ -621,7 +776,7 @@ def _choose_backend_for_model(model: str):
     return None
 
 
-#ollama api endpoints:
+# ollama api endpoints:
 # POST /api/generate
 # POST /api/chat
 # POST /api/embed
@@ -641,7 +796,7 @@ def _choose_backend_for_model(model: str):
 
 def get_user_key(user):
     users = pd.read_csv(_abs_path(USERS_FILE_PATH))
-    users = dict(zip(users['user'], users['accessKey']))
+    users = dict(zip(users["user"], users["accessKey"]))
     return users.get(user, None)
 
 
@@ -652,7 +807,7 @@ def _save_last_used(model):
     today = datetime.datetime.today().strftime("%d.%m.%Y")
     rows = []
     models = _abs_path(MODELS_FILE_PATH)
-    with open(models, newline='') as f:
+    with open(models, newline="") as f:
         reader = csv.reader(f)
         header = next(reader)
         for row in reader:
@@ -660,41 +815,79 @@ def _save_last_used(model):
                 row[1] = today
             rows.append(row)
 
-    with open(models, 'w', newline='') as f:
+    with open(models, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(header)
         writer.writerows(rows)
 
 
 class RequestHandler(BaseHTTPRequestHandler):
-
-    def add_access_log_entry(self, event, user, ip_address, access, server, nb_queued_requests_on_server, error=""):
+    def add_access_log_entry(
+        self,
+        event,
+        user,
+        ip_address,
+        access,
+        server,
+        nb_queued_requests_on_server,
+        error="",
+    ):
         # Uses global LOG_FILE_PATH
         log_file_path_obj = Path(LOG_FILE_PATH)
 
         if not log_file_path_obj.exists():
-            with open(log_file_path_obj, mode='w', newline='') as csvfile:
-                fieldnames = ['time_stamp', 'event', 'user_name', 'ip_address', 'access', 'server', 'nb_queued_requests_on_server', 'error']
+            with open(log_file_path_obj, mode="w", newline="") as csvfile:
+                fieldnames = [
+                    "time_stamp",
+                    "event",
+                    "user_name",
+                    "ip_address",
+                    "access",
+                    "server",
+                    "nb_queued_requests_on_server",
+                    "error",
+                ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
 
-        with open(log_file_path_obj, mode='a', newline='') as csvfile:
-            fieldnames = ['time_stamp', 'event', 'user_name', 'ip_address', 'access', 'server', 'nb_queued_requests_on_server', 'error']
+        with open(log_file_path_obj, mode="a", newline="") as csvfile:
+            fieldnames = [
+                "time_stamp",
+                "event",
+                "user_name",
+                "ip_address",
+                "access",
+                "server",
+                "nb_queued_requests_on_server",
+                "error",
+            ]
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            row = {'time_stamp': str(datetime.datetime.now()), 'event':event, 'user_name': user, 'ip_address': ip_address, 'access': access, 'server': server, 'nb_queued_requests_on_server': nb_queued_requests_on_server, 'error': error}
+            row = {
+                "time_stamp": str(datetime.datetime.now()),
+                "event": event,
+                "user_name": user,
+                "ip_address": ip_address,
+                "access": access,
+                "server": server,
+                "nb_queued_requests_on_server": nb_queued_requests_on_server,
+                "error": error,
+            }
             writer.writerow(row)
-
 
     def _send_response(self, response):
         self.send_response(response.status_code)
         for key, value in response.headers.items():
-            if key.lower() not in ['content-length', 'transfer-encoding', 'content-encoding']:
+            if key.lower() not in [
+                "content-length",
+                "transfer-encoding",
+                "content-encoding",
+            ]:
                 self.send_header(key, value)
         self.end_headers()
 
         try:
             content = response.content
-            if hasattr(response, 'iter_content'):
+            if hasattr(response, "iter_content"):
                 for chunk in response.iter_content(chunk_size=8192):
                     self.wfile.write(chunk)
             else:
@@ -706,29 +899,25 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"Error sending response content: {e}")
 
-
     def do_HEAD(self):
         self.log_request()
         self.proxy()
-
 
     def do_GET(self):
         self.log_request()
         self.proxy()
 
-
     def do_POST(self):
         self.log_request()
         self.proxy()
 
-
     def _validate_user_and_key(self):
         try:
-            auth_header = self.headers.get('Authorization')
+            auth_header = self.headers.get("Authorization")
             if not auth_header:
                 return False
             token = auth_header
-            user, key = token.split(':', 1)
+            user, key = token.split(":", 1)
 
             if get_user_key(user) == key:
                 self.user = user
@@ -741,32 +930,43 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.user = "unknown (auth_error)"
             return False
 
-
     def proxy(self):
         self.user = "unknown"
         client_ip, client_port = self.client_address
         if not DEACTIVATE_SECURITY and not self._validate_user_and_key():
-            print(f'User is not authorized from {client_ip}:{client_port}')
-            auth_header = self.headers.get('Authorization')
+            print(f"User is not authorized from {client_ip}:{client_port}")
+            auth_header = self.headers.get("Authorization")
             token_info = "No token"
             if auth_header:
                 token_info = auth_header
-            self.add_access_log_entry(event='rejected', user=token_info, ip_address=client_ip, access="Denied", server="None", nb_queued_requests_on_server=-1, error="Authentication failed")
+            self.add_access_log_entry(
+                event="rejected",
+                user=token_info,
+                ip_address=client_ip,
+                access="Denied",
+                server="None",
+                nb_queued_requests_on_server=-1,
+                error="Authentication failed",
+            )
             self.send_response(403)
-            self.send_header('Content-type', 'application/json')
+            self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "Forbidden: Authentication failed"}).encode('utf-8'))
+            self.wfile.write(
+                json.dumps({"error": "Forbidden: Authentication failed"}).encode(
+                    "utf-8"
+                )
+            )
             return
         print(f"User '{self.user}' from {client_ip}:{client_port} is authorized.")
         url = urlparse(self.path)
         path = url.path
         get_params = parse_qs(url.query) or {}
 
-        post_data = b''
+        post_data = b""
         if self.command == "POST":
             print(f"POST request to {path} from user {self.user}")
             try:
-                content_length = int(self.headers['Content-Length'])
+                content_length = int(self.headers["Content-Length"])
                 post_data = self.rfile.read(content_length)
             except (TypeError, ValueError):
                 print("POST request without valid Content-Length.")
@@ -779,43 +979,57 @@ class RequestHandler(BaseHTTPRequestHandler):
             names = _get_enabled_healthy_workers()
             if not names:
                 self.send_response(503)
-                self.send_header('Content-type', 'application/json')
+                self.send_header("Content-type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": "Service Unavailable: No backend servers configured."}).encode('utf-8'))
+                self.wfile.write(
+                    json.dumps(
+                        {"error": "Service Unavailable: No backend servers configured."}
+                    ).encode("utf-8")
+                )
                 return
             with _STATE_LOCK:
                 first_name = names[0]
-                target_url = _WORKERS[first_name]['url']
+                target_url = _WORKERS[first_name]["url"]
             try:
                 response = requests.request(
                     self.command,
                     target_url + path,
                     params=get_params,
-                    headers={k: v for k, v in self.headers.items() if k.lower() not in ['host', 'connection', 'content-length']}
+                    headers={
+                        k: v
+                        for k, v in self.headers.items()
+                        if k.lower() not in ["host", "connection", "content-length"]
+                    },
                 )
                 self._send_response(response)
             except requests.exceptions.RequestException as ex:
                 print(f"Proxy GET request to {first_name} failed: {ex}")
                 self.send_response(502)
-                self.send_header('Content-type', 'application/json')
+                self.send_header("Content-type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": "Bad Gateway: Upstream server request failed"}).encode('utf-8'))
+                self.wfile.write(
+                    json.dumps(
+                        {"error": "Bad Gateway: Upstream server request failed"}
+                    ).encode("utf-8")
+                )
             except Exception as ex_other:
                 print(f"Unexpected error during proxy GET to {first_name}: {ex_other}")
                 self.send_response(500)
-                self.send_header('Content-type', 'application/json')
+                self.send_header("Content-type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": "Internal Server Error"}).encode('utf-8'))
+                self.wfile.write(
+                    json.dumps({"error": "Internal Server Error"}).encode("utf-8")
+                )
             return
 
         # Only allow certain POST endpoints
         allowed_post_paths = [
-            '/api/generate',
-            '/api/chat',
-            '/api/embed',
-            '/api/embeddings',
-            '/api/show',
-            '/v1/chat/completions'
+            "/api/generate",
+            "/api/chat",
+            "/api/embed",
+            "/api/embeddings",
+            "/api/show",
+            "/v1/chat/completions",
         ]
 
         if self.command == "POST" and path in allowed_post_paths:
@@ -825,79 +1039,126 @@ class RequestHandler(BaseHTTPRequestHandler):
             is_streaming = False
             if post_data:
                 try:
-                    post_data_dict = json.loads(post_data.decode('utf-8'))
-                    model = post_data_dict.get('model')
-                    is_streaming = post_data_dict.get('stream', False)
+                    post_data_dict = json.loads(post_data.decode("utf-8"))
+                    model = post_data_dict.get("model")
+                    is_streaming = post_data_dict.get("stream", False)
                     if model:
                         _save_last_used(model)
                 except Exception:
                     pass
             print(f"Requested model: {model if model else 'None'}")
             chosen = _choose_backend_for_model(model or "")
-            print(f"Chosen backend for model '{model}': {chosen[0] if chosen else 'None'}")
+            print(
+                f"Chosen backend for model '{model}': {chosen[0] if chosen else 'None'}"
+            )
             if not chosen:
                 # Provide a descriptive error including currently usable models
                 _refresh_worker_registry()
                 enabled_healthy = _get_enabled_healthy_workers()
                 if not enabled_healthy:
                     self.send_response(503)
-                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Content-type", "application/json")
                     self.end_headers()
-                    self.wfile.write(json.dumps({
-                        "error": "Service Unavailable: No enabled and healthy workers available."
-                    }).encode('utf-8'))
+                    self.wfile.write(
+                        json.dumps(
+                            {
+                                "error": "Service Unavailable: No enabled and healthy workers available."
+                            }
+                        ).encode("utf-8")
+                    )
                     return
 
-                available_models = _get_available_models_for_enabled_healthy(force_refresh=True)
+                available_models = _get_available_models_for_enabled_healthy(
+                    force_refresh=True
+                )
                 # Log and return 404 if a model was requested but not found
                 self.add_access_log_entry(
-                    event='model_not_available',
+                    event="model_not_available",
                     user=self.user,
                     ip_address=client_ip,
                     access="Authorized",
                     server="None",
                     nb_queued_requests_on_server=0,
-                    error=f"Requested model '{model}' not available"
+                    error=f"Requested model '{model}' not available",
                 )
                 self.send_response(404)
-                self.send_header('Content-type', 'application/json')
+                self.send_header("Content-type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({
-                    "error": f"Model '{model}' is not available on any enabled and healthy workers. available_models:\n{available_models}"
-                }).encode('utf-8'))
+                self.wfile.write(
+                    json.dumps(
+                        {
+                            "error": f"Model '{model}' is not available on any enabled and healthy workers. available_models:\n{available_models}"
+                        }
+                    ).encode("utf-8")
+                )
                 return
 
             name, target_url, que, _, _ = chosen
-            self.add_access_log_entry(event="gen_request", user=self.user, ip_address=client_ip, access="Authorized", server=name, nb_queued_requests_on_server=que.qsize())
+            self.add_access_log_entry(
+                event="gen_request",
+                user=self.user,
+                ip_address=client_ip,
+                access="Authorized",
+                server=name,
+                nb_queued_requests_on_server=que.qsize(),
+            )
             que.put_nowait(1)
             start_time = time.time()
             try:
-                print(f"Proxying {self.command} {path} to {name} at {target_url} for user {self.user}")
+                print(
+                    f"Proxying {self.command} {path} to {name} at {target_url} for user {self.user}"
+                )
                 response = requests.request(
                     self.command,
                     target_url + path,
                     params=get_params,
                     data=post_data,
-                    headers={k: v for k, v in self.headers.items() if k.lower() not in ['host', 'connection', 'content-length']},
-                    stream=is_streaming
+                    headers={
+                        k: v
+                        for k, v in self.headers.items()
+                        if k.lower() not in ["host", "connection", "content-length"]
+                    },
+                    stream=is_streaming,
                 )
                 self._send_response(response)
             except requests.exceptions.RequestException as ex:
                 print(f"Proxy request to {name} failed: {ex}")
                 traceback.print_exc()
-                self.add_access_log_entry(event="gen_error",user=self.user, ip_address=client_ip, access="Authorized", server=name, nb_queued_requests_on_server=que.qsize(),error=str(ex))
+                self.add_access_log_entry(
+                    event="gen_error",
+                    user=self.user,
+                    ip_address=client_ip,
+                    access="Authorized",
+                    server=name,
+                    nb_queued_requests_on_server=que.qsize(),
+                    error=str(ex),
+                )
                 self.send_response(502)
-                self.send_header('Content-type', 'application/json')
+                self.send_header("Content-type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": "Bad Gateway: Upstream server request failed"}).encode('utf-8'))
+                self.wfile.write(
+                    json.dumps(
+                        {"error": "Bad Gateway: Upstream server request failed"}
+                    ).encode("utf-8")
+                )
             except Exception as ex_other:
                 print(f"Unexpected error during proxy to {name}: {ex_other}")
                 traceback.print_exc()
-                self.add_access_log_entry(event="gen_error",user=self.user, ip_address=client_ip, access="Authorized", server=name, nb_queued_requests_on_server=que.qsize(),error=str(ex_other))
+                self.add_access_log_entry(
+                    event="gen_error",
+                    user=self.user,
+                    ip_address=client_ip,
+                    access="Authorized",
+                    server=name,
+                    nb_queued_requests_on_server=que.qsize(),
+                    error=str(ex_other),
+                )
                 self.send_response(500)
-                self.send_header('Content-type', 'application/json')
+                self.send_header("Content-type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": "Internal Server Error"}).encode('utf-8'))
+                self.wfile.write(
+                    json.dumps({"error": "Internal Server Error"}).encode("utf-8")
+                )
             finally:
                 duration = time.time() - start_time
                 if self.user and self.user != "unknown" and duration > 0:
@@ -907,7 +1168,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                         print(f"Failed to log usage for user {self.user}: {e}")
                 if not que.empty():
                     que.get_nowait()
-                self.add_access_log_entry(event="gen_done",user=self.user, ip_address=client_ip, access="Authorized", server=name, nb_queued_requests_on_server=que.qsize())
+                self.add_access_log_entry(
+                    event="gen_done",
+                    user=self.user,
+                    ip_address=client_ip,
+                    access="Authorized",
+                    server=name,
+                    nb_queued_requests_on_server=que.qsize(),
+                )
             return
 
         # Block all other POST endpoints with an error message
@@ -916,20 +1184,24 @@ class RequestHandler(BaseHTTPRequestHandler):
             names = _get_enabled_healthy_workers()
             server_name = names[0] if names else "None"
             self.add_access_log_entry(
-                event='blocked_post',
+                event="blocked_post",
                 user=self.user,
                 ip_address=client_ip,
                 access="Denied",
                 server=server_name,
                 nb_queued_requests_on_server=0,
-                error=f"Blocked POST to {path}"
+                error=f"Blocked POST to {path}",
             )
             self.send_response(403)
-            self.send_header('Content-type', 'application/json')
+            self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({
-                "error": f"Forbidden: POST to '{path}' is not allowed. Allowed POST endpoints: {', '.join(allowed_post_paths)}"
-            }).encode('utf-8'))
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "error": f"Forbidden: POST to '{path}' is not allowed. Allowed POST endpoints: {', '.join(allowed_post_paths)}"
+                    }
+                ).encode("utf-8")
+            )
             return
 
         # For any other method, fallback to simple proxying to first backend
@@ -937,41 +1209,59 @@ class RequestHandler(BaseHTTPRequestHandler):
         names = _get_enabled_healthy_workers()
         if not names:
             self.send_response(503)
-            self.send_header('Content-type', 'application/json')
+            self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "Service Unavailable: No backend servers configured."}).encode('utf-8'))
+            self.wfile.write(
+                json.dumps(
+                    {"error": "Service Unavailable: No backend servers configured."}
+                ).encode("utf-8")
+            )
             return
         with _STATE_LOCK:
             first_name = names[0]
-            target_url = _WORKERS[first_name]['url']
+            target_url = _WORKERS[first_name]["url"]
         try:
             response = requests.request(
                 self.command,
                 target_url + path,
                 params=get_params,
                 data=post_data,
-                headers={k: v for k, v in self.headers.items() if k.lower() not in ['host', 'connection', 'content-length']}
+                headers={
+                    k: v
+                    for k, v in self.headers.items()
+                    if k.lower() not in ["host", "connection", "content-length"]
+                },
             )
             self._send_response(response)
         except requests.exceptions.RequestException as ex:
             print(f"Proxy request to {first_name} for non-gen endpoint failed: {ex}")
             self.send_response(502)
-            self.send_header('Content-type', 'application/json')
+            self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "Bad Gateway: Upstream server request failed"}).encode('utf-8'))
+            self.wfile.write(
+                json.dumps(
+                    {"error": "Bad Gateway: Upstream server request failed"}
+                ).encode("utf-8")
+            )
         except Exception as ex_other:
-            print(f"Unexpected error during proxy (non-gen) to {first_name}: {ex_other}")
+            print(
+                f"Unexpected error during proxy (non-gen) to {first_name}: {ex_other}"
+            )
             self.send_response(500)
-            self.send_header('Content-type', 'application/json')
+            self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "Internal Server Error"}).encode('utf-8'))
+            self.wfile.write(
+                json.dumps({"error": "Internal Server Error"}).encode("utf-8")
+            )
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     pass
 
 
-def _worker_state_refresher_loop(interval_seconds: int = 15, models_ttl_seconds: int = 30):
+def _worker_state_refresher_loop(
+    interval_seconds: int = 15, models_ttl_seconds: int = 30
+):
     """Background loop to keep _WORKERS cache warm (models and VRAM) and probe health.
     Periodically:
     - refresh the worker registry
@@ -987,11 +1277,33 @@ def _worker_state_refresher_loop(interval_seconds: int = 15, models_ttl_seconds:
             try:
                 df = _get_workers_df()
                 for _, row in df.iterrows():
-                    name = row.get('name')
+                    name = row.get("name")
                     if isinstance(name, str):
                         _probe_worker_health(name)
             except Exception as e_probe:
                 print(f"Health probe loop error: {e_probe}")
+
+            all_names = []
+            try:
+                df2 = _get_workers_df()
+                for _, r in df2.iterrows():
+                    n = r.get("name")
+                    if isinstance(n, str):
+                        all_names.append((n, r.get("url", "")))
+            except Exception:
+                pass
+            for n, url in all_names:
+                try:
+                    activity_data = _fetch_worker_activity_status(n, url)
+                    if activity_data is not None:
+                        with _STATE_LOCK:
+                            if n in _WORKERS:
+                                _WORKERS[n]["activity_disabled"] = activity_data.get(
+                                    "disabled", False
+                                )
+                                _WORKERS[n]["activity_status"] = activity_data
+                except Exception:
+                    pass
 
             names = _get_enabled_healthy_workers()
             for n in names:
@@ -1004,7 +1316,9 @@ def _worker_state_refresher_loop(interval_seconds: int = 15, models_ttl_seconds:
                 except Exception:
                     pass
                 try:
-                    _refresh_available_models(n, ttl_seconds=max(models_ttl_seconds, 45))
+                    _refresh_available_models(
+                        n, ttl_seconds=max(models_ttl_seconds, 45)
+                    )
                 except Exception:
                     pass
         except Exception as e:
@@ -1012,10 +1326,16 @@ def _worker_state_refresher_loop(interval_seconds: int = 15, models_ttl_seconds:
         time.sleep(max(5, int(interval_seconds)))
 
 
-def start_worker_state_refresher_thread(interval_seconds: int = 15, models_ttl_seconds: int = 30):
-    t = threading.Thread(target=_worker_state_refresher_loop, kwargs={
-        'interval_seconds': interval_seconds,
-        'models_ttl_seconds': models_ttl_seconds,
-    }, daemon=True)
+def start_worker_state_refresher_thread(
+    interval_seconds: int = 15, models_ttl_seconds: int = 30
+):
+    t = threading.Thread(
+        target=_worker_state_refresher_loop,
+        kwargs={
+            "interval_seconds": interval_seconds,
+            "models_ttl_seconds": models_ttl_seconds,
+        },
+        daemon=True,
+    )
     t.start()
     return t
