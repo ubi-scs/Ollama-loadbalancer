@@ -29,25 +29,35 @@ def _run_command(cmd, timeout=10):
         return -1, "", str(e)
 
 
-def get_wayland_sessions():
+def get_sessions():
     code, out, err = _run_command(["loginctl", "list-sessions", "--no-legend"])
     if code != 0 or not out:
         return []
     sessions = []
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) >= 4:
+        if len(parts) >= 3:
             session_id = parts[0]
-            user = parts[1]
-            session_type = parts[3] if len(parts) >= 4 else ""
+            session_type = _get_session_type(session_id)
             sessions.append(
                 {
                     "session_id": session_id,
-                    "user": user,
                     "type": session_type.lower(),
                 }
             )
     return sessions
+
+
+def _get_session_type(session_id):
+    code, out, err = _run_command(
+        ["loginctl", "show-session", str(session_id), "-p", "Type"]
+    )
+    if code != 0:
+        return ""
+    for line in out.splitlines():
+        if "=" in line:
+            return line.split("=", 1)[1].strip().lower()
+    return ""
 
 
 def is_session_idle(session_id):
@@ -60,11 +70,11 @@ def is_session_idle(session_id):
 
 
 def is_user_active():
-    sessions = get_wayland_sessions()
+    sessions = get_sessions()
     if not sessions:
         return False
     for session in sessions:
-        if session["type"] == "wayland":
+        if session["type"] in ("wayland", "x11"):
             if not is_session_idle(session["session_id"]):
                 return True
     return False

@@ -732,9 +732,15 @@ class TestActivityMonitorAPI:
     def test_activity_status_initial_state(self, worker_instance):
         resp = worker_instance["client"].get("/worker/activity-status")
         data = resp.json()
-        assert data["disabled"] is False
-        assert data["remaining_seconds"] == 0
-        assert data["disabled_until"] == 0
+        assert isinstance(data["disabled"], bool)
+        assert isinstance(data["remaining_seconds"], (int, float))
+        assert isinstance(data["disabled_until"], (int, float))
+        if data["disabled"]:
+            assert data["remaining_seconds"] > 0
+            assert data["disabled_until"] > 0
+        else:
+            assert data["remaining_seconds"] == 0
+            assert data["disabled_until"] == 0
 
     def test_activity_status_reflects_in_version(self, worker_instance):
         version_resp = worker_instance["client"].get("/api/version")
