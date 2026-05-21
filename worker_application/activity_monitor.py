@@ -64,9 +64,32 @@ def is_session_idle(session_id):
     code, out, err = _run_command(
         ["loginctl", "show-session", str(session_id), "-p", "IdleHint"]
     )
-    if code != 0:
+    if code == 0 and "yes" in out.lower():
         return True
-    return "yes" in out.lower()
+    if _is_screensaver_active():
+        return True
+    return False
+
+
+def _is_screensaver_active():
+    code, out, err = _run_command(
+        [
+            "dbus-send",
+            "--session",
+            "--print-reply",
+            "--dest=org.freedesktop.ScreenSaver",
+            "/org/freedesktop/ScreenSaver",
+            "org.freedesktop.ScreenSaver.GetActive",
+        ],
+        timeout=5,
+    )
+    if code != 0:
+        return False
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("boolean"):
+            return "true" in stripped.lower()
+    return False
 
 
 def is_user_active():
