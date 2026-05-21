@@ -3,11 +3,21 @@ import logging
 import threading
 import time
 import os
+import glob as _glob
+
+try:
+    import evdev
+
+    _EVDEV_AVAILABLE = True
+except ImportError:
+    evdev = None
+    _EVDEV_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 DISABLE_COOLDOWN_SECONDS = int(os.getenv("WORKER_DISABLE_COOLDOWN", "900"))
 CHECK_INTERVAL_SECONDS = int(os.getenv("WORKER_ACTIVITY_CHECK_INTERVAL", "30"))
+IDLE_TIMEOUT_SECONDS = int(os.getenv("WORKER_IDLE_TIMEOUT", "300"))
 VRAM_THRESHOLD_PCT = float(os.getenv("WORKER_VRAM_THRESHOLD_PCT", "25"))
 ALLOWED_PROCESS_NAMES = os.getenv(
     "WORKER_ALLOWED_GPU_PROCESSES", "ollama,ollama_llm_server,nvidia-smi"
@@ -27,6 +37,114 @@ def _run_command(cmd, timeout=10):
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         logger.debug(f"Command {cmd} failed: {e}")
         return -1, "", str(e)
+
+
+class InputDeviceMonitor:
+    def __init__(self, idle_timeout=None):
+        self.idle_timeout = (
+            idle_timeout if idle_timeout is not None else IDLE_TIMEOUT_SECONDS
+        )
+        self._last_activity = time.monotonic()
+        self._lock = threading.Lock()
+        self._running = False
+        self._stop_event = threading.Event()
+        self._threads = []
+        self._monitored_paths = set()
+        self._available = False
+
+    def is_available(self):
+        return _EVDEV_AVAILABLE and self._available
+
+    def start(self):
+        if self._running:
+            return
+        if not _EVDEV_AVAILABLE:
+            logger.info("evdev not available, input device monitoring disabled")
+            return
+        self._running = True
+        self._stop_event.clear()
+        self._open_devices()
+        if self._monitored_paths:
+            self._available = True
+            t = threading.Thread(target=self._rescan_loop, daemon=True)
+            t.start()
+            self._threads.append(t)
+            logger.info(
+                f"Input device monitor started, watching {len(self._monitored_paths)} devices"
+            )
+        else:
+            logger.info(
+                "No input devices could be opened, input monitoring unavailable"
+            )
+        self._last_activity = time.monotonic()
+
+    def stop(self):
+        if not self._running:
+            return
+        self._running = False
+        self._stop_event.set()
+        for t in self._threads:
+            t.join(timeout=2)
+        self._threads.clear()
+        self._monitored_paths.clear()
+        self._available = False
+
+    def _open_devices(self):
+        try:
+            device_paths = evdev.list_devices()
+        except Exception:
+            device_paths = _glob.glob("/dev/input/event*")
+        for path in device_paths:
+            if path in self._monitored_paths:
+                continue
+            try:
+                dev = evdev.InputDevice(path)
+                if evdev.ecodes.EV_KEY in dev.capabilities():
+                    self._monitored_paths.add(path)
+                    t = threading.Thread(
+                        target=self._monitor_device, args=(path,), daemon=True
+                    )
+                    t.start()
+                    self._threads.append(t)
+                    logger.debug(f"Monitoring input device: {dev.name} ({path})")
+            except (OSError, PermissionError) as e:
+                logger.debug(f"Cannot open {path}: {e}")
+            except Exception as e:
+                logger.debug(f"Error opening {path}: {e}")
+
+    def _monitor_device(self, path):
+        try:
+            dev = evdev.InputDevice(path)
+            for event in dev.read_loop():
+                if self._stop_event.is_set():
+                    return
+                if event.type == evdev.ecodes.EV_KEY:
+                    with self._lock:
+                        self._last_activity = time.monotonic()
+        except OSError:
+            logger.debug(f"Device {path} disconnected or inaccessible")
+            self._monitored_paths.discard(path)
+        except Exception as e:
+            logger.debug(f"Error monitoring {path}: {e}")
+            self._monitored_paths.discard(path)
+
+    def _rescan_loop(self):
+        while not self._stop_event.is_set():
+            self._stop_event.wait(30)
+            if self._stop_event.is_set():
+                break
+            try:
+                self._open_devices()
+            except Exception as e:
+                logger.debug(f"Device rescan failed: {e}")
+
+    def is_user_active(self):
+        with self._lock:
+            return (time.monotonic() - self._last_activity) < self.idle_timeout
+
+    def get_idle_seconds(self):
+        with self._lock:
+            return time.monotonic() - self._last_activity
 
 
 def get_sessions():
@@ -60,15 +178,13 @@ def _get_session_type(session_id):
     return ""
 
 
-def is_session_idle(session_id):
+def _is_session_idle_loginctl(session_id):
     code, out, err = _run_command(
         ["loginctl", "show-session", str(session_id), "-p", "IdleHint"]
     )
     if code == 0 and "yes" in out.lower():
         return True
-    if _is_screensaver_active():
-        return True
-    return False
+    return None
 
 
 def _is_screensaver_active():
@@ -84,22 +200,186 @@ def _is_screensaver_active():
         timeout=5,
     )
     if code != 0:
-        return False
+        return None
     for line in out.splitlines():
         stripped = line.strip()
         if stripped.startswith("boolean"):
             return "true" in stripped.lower()
+    return None
+
+
+def _is_user_idle_loginctl():
+    sessions = get_sessions()
+    if not sessions:
+        return None
+    for session in sessions:
+        if session["type"] not in ("wayland", "x11"):
+            continue
+        idle_hint = _is_session_idle_loginctl(session["session_id"])
+        if idle_hint is True:
+            return True
+        if idle_hint is None:
+            screensaver = _is_screensaver_active()
+            if screensaver is True:
+                return True
     return False
 
 
-def is_user_active():
-    sessions = get_sessions()
-    if not sessions:
+class ActivityMonitor:
+    def __init__(
+        self,
+        check_interval=None,
+        disable_cooldown=None,
+        vram_threshold_pct=None,
+        idle_timeout=None,
+    ):
+        self.check_interval = check_interval or CHECK_INTERVAL_SECONDS
+        self.disable_cooldown = disable_cooldown or DISABLE_COOLDOWN_SECONDS
+        self.vram_threshold_pct = (
+            vram_threshold_pct if vram_threshold_pct is not None else VRAM_THRESHOLD_PCT
+        )
+        self.idle_timeout = (
+            idle_timeout if idle_timeout is not None else IDLE_TIMEOUT_SECONDS
+        )
+
+        self._lock = threading.Lock()
+        self._disabled_until = 0.0
+        self._user_active = False
+        self._gpu_contended = False
+        self._running = False
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._last_check_time = 0.0
+        self._last_disable_reason = None
+        self._input_monitor = InputDeviceMonitor(idle_timeout=self.idle_timeout)
+
+    def _is_user_active(self):
+        if self._input_monitor.is_available():
+            return self._input_monitor.is_user_active()
+        loginctl_idle = _is_user_idle_loginctl()
+        if loginctl_idle is False:
+            return True
+        if loginctl_idle is True:
+            return False
         return False
-    for session in sessions:
-        if session["type"] in ("wayland", "x11"):
-            if not is_session_idle(session["session_id"]):
-                return True
+
+    def check_now(self):
+        user_active = self._is_user_active()
+        gpu_contended = is_gpu_vram_contended(
+            vram_threshold_pct=self.vram_threshold_pct
+        )
+
+        now = time.time()
+        reason = None
+
+        with self._lock:
+            self._user_active = user_active
+            self._gpu_contended = gpu_contended
+            self._last_check_time = now
+
+            if user_active:
+                self._disabled_until = now + self.disable_cooldown
+                reason = "user_active"
+            elif gpu_contended:
+                self._disabled_until = now + self.disable_cooldown
+                reason = "gpu_vram_contended"
+            else:
+                if now >= self._disabled_until:
+                    self._disabled_until = 0.0
+
+            self._last_disable_reason = reason
+
+    def _monitor_loop(self):
+        logger.info("Activity monitor started.")
+        while not self._stop_event.is_set():
+            try:
+                self.check_now()
+            except Exception as e:
+                logger.error(f"Activity monitor check failed: {e}")
+            self._stop_event.wait(self.check_interval)
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._stop_event.clear()
+        self._input_monitor.start()
+        if self._input_monitor.is_available():
+            logger.info(
+                "Activity monitor: using evdev input device monitoring "
+                "(%d devices, idle timeout %ds)",
+                len(self._input_monitor._monitored_paths),
+                self.idle_timeout,
+            )
+        else:
+            logger.info(
+                "Activity monitor: evdev not available, falling back to "
+                "loginctl/screensaver idle detection"
+            )
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._thread.start()
+        self.check_now()
+
+    def stop(self):
+        if not self._running:
+            return
+        self._running = False
+        self._stop_event.set()
+        self._input_monitor.stop()
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def is_disabled(self):
+        with self._lock:
+            return time.time() < self._disabled_until
+
+    def get_status(self):
+        with self._lock:
+            now = time.time()
+            disabled = now < self._disabled_until
+            remaining = max(0, self._disabled_until - now) if disabled else 0
+            status = {
+                "disabled": disabled,
+                "disabled_until": self._disabled_until if disabled else 0,
+                "remaining_seconds": round(remaining, 1),
+                "user_active": self._user_active,
+                "gpu_vram_contended": self._gpu_contended,
+                "last_check_time": self._last_check_time,
+                "last_disable_reason": self._last_disable_reason,
+            }
+            if self._input_monitor.is_available():
+                status["idle_seconds"] = round(
+                    self._input_monitor.get_idle_seconds(), 1
+                )
+                status["input_devices_monitored"] = len(
+                    self._input_monitor._monitored_paths
+                )
+            return status
+
+
+def is_gpu_vram_contended(total_vram_mb=None, vram_threshold_pct=None):
+    if total_vram_mb is None:
+        total_vram_mb = get_total_vram_mb()
+    if total_vram_mb <= 0:
+        return False
+    if vram_threshold_pct is None:
+        vram_threshold_pct = VRAM_THRESHOLD_PCT
+
+    threshold_mb = total_vram_mb * (vram_threshold_pct / 100.0)
+    processes = get_process_gpu_memory()
+
+    own_pid = os.getpid()
+    allowed_names_lower = [n.strip().lower() for n in ALLOWED_PROCESS_NAMES]
+
+    for proc in processes:
+        if proc["pid"] == own_pid:
+            continue
+        if proc["name"] in allowed_names_lower:
+            continue
+        if proc["used_memory_mb"] >= threshold_mb:
+            return True
+
     return False
 
 
@@ -141,124 +421,3 @@ def get_total_vram_mb():
         return float(out.split("\n")[0].strip())
     except (ValueError, IndexError):
         return 0
-
-
-def is_gpu_vram_contended(total_vram_mb=None, vram_threshold_pct=None):
-    if total_vram_mb is None:
-        total_vram_mb = get_total_vram_mb()
-    if total_vram_mb <= 0:
-        return False
-    if vram_threshold_pct is None:
-        vram_threshold_pct = VRAM_THRESHOLD_PCT
-
-    threshold_mb = total_vram_mb * (vram_threshold_pct / 100.0)
-    processes = get_process_gpu_memory()
-
-    own_pid = os.getpid()
-    allowed_names_lower = [n.strip().lower() for n in ALLOWED_PROCESS_NAMES]
-
-    for proc in processes:
-        if proc["pid"] == own_pid:
-            continue
-        if proc["name"] in allowed_names_lower:
-            continue
-        if proc["used_memory_mb"] >= threshold_mb:
-            return True
-
-    return False
-
-
-class ActivityMonitor:
-    def __init__(
-        self,
-        check_interval=None,
-        disable_cooldown=None,
-        vram_threshold_pct=None,
-    ):
-        self.check_interval = check_interval or CHECK_INTERVAL_SECONDS
-        self.disable_cooldown = disable_cooldown or DISABLE_COOLDOWN_SECONDS
-        self.vram_threshold_pct = (
-            vram_threshold_pct if vram_threshold_pct is not None else VRAM_THRESHOLD_PCT
-        )
-
-        self._lock = threading.Lock()
-        self._disabled_until = 0.0
-        self._user_active = False
-        self._gpu_contended = False
-        self._running = False
-        self._stop_event = threading.Event()
-        self._thread = None
-        self._last_check_time = 0.0
-        self._last_disable_reason = None
-
-    def check_now(self):
-        user_active = is_user_active()
-        gpu_contended = is_gpu_vram_contended(
-            vram_threshold_pct=self.vram_threshold_pct
-        )
-
-        now = time.time()
-        reason = None
-
-        with self._lock:
-            self._user_active = user_active
-            self._gpu_contended = gpu_contended
-            self._last_check_time = now
-
-            if user_active:
-                self._disabled_until = now + self.disable_cooldown
-                reason = "user_active"
-            elif gpu_contended:
-                self._disabled_until = now + self.disable_cooldown
-                reason = "gpu_vram_contended"
-            else:
-                if now >= self._disabled_until:
-                    self._disabled_until = 0.0
-
-            self._last_disable_reason = reason
-
-    def _monitor_loop(self):
-        logger.info("Activity monitor started.")
-        while not self._stop_event.is_set():
-            try:
-                self.check_now()
-            except Exception as e:
-                logger.error(f"Activity monitor check failed: {e}")
-            self._stop_event.wait(self.check_interval)
-
-    def start(self):
-        if self._running:
-            return
-        self._running = True
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self._thread.start()
-        self.check_now()
-
-    def stop(self):
-        if not self._running:
-            return
-        self._running = False
-        self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
-
-    def is_disabled(self):
-        with self._lock:
-            return time.time() < self._disabled_until
-
-    def get_status(self):
-        with self._lock:
-            now = time.time()
-            disabled = now < self._disabled_until
-            remaining = max(0, self._disabled_until - now) if disabled else 0
-            return {
-                "disabled": disabled,
-                "disabled_until": self._disabled_until if disabled else 0,
-                "remaining_seconds": round(remaining, 1),
-                "user_active": self._user_active,
-                "gpu_vram_contended": self._gpu_contended,
-                "last_check_time": self._last_check_time,
-                "last_disable_reason": self._last_disable_reason,
-            }
