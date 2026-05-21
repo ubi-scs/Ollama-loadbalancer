@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 DISABLE_COOLDOWN_SECONDS = int(os.getenv("WORKER_DISABLE_COOLDOWN", "900"))
 CHECK_INTERVAL_SECONDS = int(os.getenv("WORKER_ACTIVITY_CHECK_INTERVAL", "30"))
-VRAM_THRESHOLD_PCT = float(os.getenv("WORKER_VRAM_THRESHOLD_PCT", "50"))
+VRAM_THRESHOLD_PCT = float(os.getenv("WORKER_VRAM_THRESHOLD_PCT", "25"))
 ALLOWED_PROCESS_NAMES = os.getenv(
     "WORKER_ALLOWED_GPU_PROCESSES", "ollama,ollama_llm_server,nvidia-smi"
 ).split(",")
