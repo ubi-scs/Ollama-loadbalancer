@@ -15,9 +15,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-DISABLE_COOLDOWN_SECONDS = int(os.getenv("WORKER_DISABLE_COOLDOWN", "900"))
+DISABLE_COOLDOWN_SECONDS = int(os.getenv("WORKER_DISABLE_COOLDOWN", "60"))
 CHECK_INTERVAL_SECONDS = int(os.getenv("WORKER_ACTIVITY_CHECK_INTERVAL", "30"))
-IDLE_TIMEOUT_SECONDS = int(os.getenv("WORKER_IDLE_TIMEOUT", "300"))
+IDLE_TIMEOUT_SECONDS = int(os.getenv("WORKER_IDLE_TIMEOUT", "30"))
 VRAM_THRESHOLD_PCT = float(os.getenv("WORKER_VRAM_THRESHOLD_PCT", "25"))
 ALLOWED_PROCESS_NAMES = os.getenv(
     "WORKER_ALLOWED_GPU_PROCESSES", "ollama,ollama_llm_server,nvidia-smi"
@@ -270,9 +270,9 @@ class ActivityMonitor:
         )
 
         now = time.time()
-        reason = None
 
         with self._lock:
+            was_disabled = now < self._disabled_until
             self._user_active = user_active
             self._gpu_contended = gpu_contended
             self._last_check_time = now
@@ -280,12 +280,65 @@ class ActivityMonitor:
             if user_active:
                 self._disabled_until = now + self.disable_cooldown
                 reason = "user_active"
+                idle_secs = (
+                    self._input_monitor.get_idle_seconds()
+                    if self._input_monitor.is_available()
+                    else None
+                )
+                if not was_disabled:
+                    if idle_secs is not None:
+                        logger.info(
+                            "Worker self-disabling: user activity detected "
+                            "(idle %.1fs, below threshold of %ds). "
+                            "Worker will be unavailable for %ds.",
+                            idle_secs,
+                            self.idle_timeout,
+                            self.disable_cooldown,
+                        )
+                    else:
+                        logger.info(
+                            "Worker self-disabling: user activity detected "
+                            "(loginctl/screensaver reports user active). "
+                            "Worker will be unavailable for %ds.",
+                            self.disable_cooldown,
+                        )
+                else:
+                    logger.debug(
+                        "Worker disable extended: user still active "
+                        "(idle %.1fs). Cooldown extended by %ds.",
+                        idle_secs if idle_secs is not None else -1,
+                        self.disable_cooldown,
+                    )
             elif gpu_contended:
                 self._disabled_until = now + self.disable_cooldown
                 reason = "gpu_vram_contended"
+                if not was_disabled:
+                    logger.info(
+                        "Worker self-disabling: GPU VRAM contention detected "
+                        "(foreign process using >=%.0f%% of VRAM). "
+                        "Worker will be unavailable for %ds.",
+                        self.vram_threshold_pct,
+                        self.disable_cooldown,
+                    )
+                else:
+                    logger.debug(
+                        "Worker disable extended: GPU VRAM still contended. "
+                        "Cooldown extended by %ds.",
+                        self.disable_cooldown,
+                    )
             else:
-                if now >= self._disabled_until:
+                reason = None
+                if was_disabled and now >= self._disabled_until:
                     self._disabled_until = 0.0
+                    logger.info(
+                        "Worker re-enabling: user is idle and GPU VRAM is free. "
+                        "Worker is now available for requests."
+                    )
+                elif was_disabled:
+                    logger.debug(
+                        "Worker still disabled, cooldown remaining: %.0fs.",
+                        self._disabled_until - now,
+                    )
 
             self._last_disable_reason = reason
 
