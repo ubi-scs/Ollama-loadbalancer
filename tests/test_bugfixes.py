@@ -92,6 +92,30 @@ class TestParseModelSizeFromString:
     def test_empty_string_returns_none(self):
         assert proxy._parse_model_size_from_string("") is None
 
+    def test_hyphenated_model_name_with_size(self):
+        assert proxy._parse_model_size_from_string("dolphin-2.7b") == 2.7
+
+    def test_hyphenated_model_name_integer_size(self):
+        assert proxy._parse_model_size_from_string("llama3-8b") == 8
+
+    def test_multi_hyphen_model_name(self):
+        assert proxy._parse_model_size_from_string("my-model-13b") == 13
+
+    def test_negative_standalone_returns_none(self):
+        assert proxy._parse_model_size_from_string("-7b") is None
+
+    def test_negative_after_colon_returns_none(self):
+        assert proxy._parse_model_size_from_string("model:-3b") is None
+
+    def test_negative_after_colon_million_returns_none(self):
+        assert proxy._parse_model_size_from_string("model:-500m") is None
+
+    def test_hyphenated_with_colon(self):
+        assert proxy._parse_model_size_from_string("namespace/model-7b") == 7
+
+    def test_decimal_with_hyphen_prefix(self):
+        assert proxy._parse_model_size_from_string("model-0.5b") == 0.5
+
 
 class TestEstimateRequiredVramMb:
     def test_none_returns_default(self):
@@ -487,3 +511,146 @@ class TestRefreshAvailableModels:
         with patch.object(proxy, "requests"):
             result = proxy._refresh_available_models("w1", ttl_seconds=60)
             assert "model_x" in result
+
+
+class TestRewriteUrlToHelperPort:
+    def _rewrite_url_to_helper_port(self, worker_url):
+        import re
+
+        if not isinstance(worker_url, str) or not re.match(r"^https?://", worker_url):
+            return None
+        if "://" in worker_url:
+            proto, rest = worker_url.split("://", 1)
+            if "/" in rest:
+                host_part, path_part = rest.split("/", 1)
+            else:
+                host_part = rest
+                path_part = ""
+            host_part = re.sub(r":\d+", ":18034", host_part)
+            if ":" not in host_part.split("/")[-1]:
+                host_part = f"{host_part}:18034"
+            if path_part:
+                new_url = f"{proto}://{host_part}/{path_part}"
+            else:
+                new_url = f"{proto}://{host_part}"
+        else:
+            new_url = worker_url
+        return new_url
+
+    def test_url_with_port_and_path(self):
+        assert (
+            self._rewrite_url_to_helper_port("http://worker:11434/some/path")
+            == "http://worker:18034/some/path"
+        )
+
+    def test_url_with_port_no_path(self):
+        assert (
+            self._rewrite_url_to_helper_port("http://worker:11434")
+            == "http://worker:18034"
+        )
+
+    def test_url_without_port_with_path(self):
+        assert (
+            self._rewrite_url_to_helper_port("http://worker/some/path")
+            == "http://worker:18034/some/path"
+        )
+
+    def test_url_without_port_no_path(self):
+        assert (
+            self._rewrite_url_to_helper_port("http://worker") == "http://worker:18034"
+        )
+
+    def test_https_url_with_port(self):
+        assert (
+            self._rewrite_url_to_helper_port("https://host:11434")
+            == "https://host:18034"
+        )
+
+    def test_https_url_without_port(self):
+        assert self._rewrite_url_to_helper_port("https://host") == "https://host:18034"
+
+    def test_invalid_url_returns_none(self):
+        assert self._rewrite_url_to_helper_port("not-a-url") is None
+
+    def test_non_string_returns_none(self):
+        assert self._rewrite_url_to_helper_port(42) is None
+
+    def test_different_port_gets_replaced(self):
+        assert (
+            self._rewrite_url_to_helper_port("http://host:8080/path")
+            == "http://host:18034/path"
+        )
+
+    def test_already_helper_port(self):
+        assert (
+            self._rewrite_url_to_helper_port("http://host:18034/status")
+            == "http://host:18034/status"
+        )
+
+
+class TestGuiParseModelSizeFromString:
+    def _gui_parse_model_size(self, model):
+        import re
+
+        if not isinstance(model, str):
+            return None
+        s = model.strip()
+        if s.startswith("-"):
+            return None
+        colon_idx = s.rfind(":")
+        if colon_idx >= 0 and s[colon_idx + 1 :].lstrip().startswith("-"):
+            return None
+        m = re.search(r"(?i)(?:.*:)?(\d+(?:\.\d+)?)([bm])$", s)
+        if not m:
+            return None
+        try:
+            value = float(m.group(1))
+        except ValueError:
+            return None
+        if value <= 0:
+            return None
+        unit = m.group(2).lower()
+        if unit == "b":
+            return value
+        if unit == "m":
+            return value / 1000.0
+        return None
+
+    def test_hyphenated_model_name(self):
+        assert self._gui_parse_model_size("dolphin-2.7b") == 2.7
+
+    def test_hyphenated_model_name_integer(self):
+        assert self._gui_parse_model_size("llama3-8b") == 8
+
+    def test_negative_standalone_returns_none(self):
+        assert self._gui_parse_model_size("-7b") is None
+
+    def test_negative_after_colon_returns_none(self):
+        assert self._gui_parse_model_size("model:-3b") is None
+
+    def test_standard_colon_format(self):
+        assert self._gui_parse_model_size("llama3:8b") == 8
+
+    def test_million_unit(self):
+        assert self._gui_parse_model_size("tiny:500m") == 0.5
+
+
+class TestParseModelSizeNoDeadCode:
+    def test_function_has_no_unreachable_code(self):
+        import inspect
+        import ast
+
+        source = inspect.getsource(proxy._parse_model_size_from_string)
+        tree = ast.parse(source)
+        func_node = tree.body[0]
+        last_return_index = None
+        for i, stmt in enumerate(func_node.body):
+            if isinstance(stmt, ast.Return):
+                last_return_index = i
+        assert last_return_index is not None
+        for i, stmt in enumerate(func_node.body):
+            if i > last_return_index:
+                pytest.fail(
+                    f"Unreachable code found after return at index {last_return_index}: "
+                    f"statement at index {i} ({ast.unparse(stmt) if hasattr(ast, 'unparse') else str(stmt)})"
+                )

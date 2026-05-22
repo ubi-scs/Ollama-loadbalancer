@@ -57,6 +57,11 @@ def _parse_model_size_from_string(model: str):
     if not isinstance(model, str):
         return None
     s = model.strip()
+    if s.startswith("-"):
+        return None
+    colon_idx = s.rfind(":")
+    if colon_idx >= 0 and s[colon_idx + 1 :].lstrip().startswith("-"):
+        return None
     m = re.search(r"(?i)(?:.*:)?(\d+(?:\.\d+)?)([bm])$", s)
     if not m:
         return None
@@ -65,8 +70,6 @@ def _parse_model_size_from_string(model: str):
     except ValueError:
         return None
     if value <= 0:
-        return None
-    if m.start() > 0 and s[m.start() - 1] == "-":
         return None
     unit = m.group(2).lower()
     if unit == "b":
@@ -1055,14 +1058,18 @@ def _rewrite_url_to_helper_port(worker_url):
         return None
     if "://" in worker_url:
         proto, rest = worker_url.split("://", 1)
-        if ":" in rest:
-            host, *path = rest.split("/", 1)
-            host = re.sub(r":\d+", ":18034", host)
-            new_url = f"{proto}://{host}"
-            if path:
-                new_url += "/" + path[0]
+        if "/" in rest:
+            host_part, path_part = rest.split("/", 1)
         else:
-            new_url = f"{proto}://{rest}:18034"
+            host_part = rest
+            path_part = ""
+        host_part = re.sub(r":\d+", ":18034", host_part)
+        if ":" not in host_part.split("/")[-1]:
+            host_part = f"{host_part}:18034"
+        if path_part:
+            new_url = f"{proto}://{host_part}/{path_part}"
+        else:
+            new_url = f"{proto}://{host_part}"
     else:
         new_url = worker_url
     return new_url

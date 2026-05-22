@@ -327,6 +327,11 @@ def _parse_model_size_from_string(model: str):
     if not isinstance(model, str):
         return None
     s = model.strip()
+    if s.startswith("-"):
+        return None
+    colon_idx = s.rfind(":")
+    if colon_idx >= 0 and s[colon_idx + 1 :].lstrip().startswith("-"):
+        return None
     m = re.search(r"(?i)(?:.*:)?(\d+(?:\.\d+)?)([bm])$", s)
     if not m:
         return None
@@ -335,27 +340,6 @@ def _parse_model_size_from_string(model: str):
     except ValueError:
         return None
     if value <= 0:
-        return None
-    if m.start() > 0 and s[m.start() - 1] == "-":
-        return None
-    unit = m.group(2).lower()
-    if unit == "b":
-        return value
-    if unit == "m":
-        return value / 1000.0
-    return None
-    s = model.strip()
-    m = re.search(r"(?i)(?:.*:)?(\d+(?:\.\d+)?)([bm])$", s)
-    if not m:
-        return None
-    try:
-        value = float(m.group(1))
-    except ValueError:
-        return None
-    if value <= 0:
-        return None
-    prefix = s[: m.start()].rstrip("-")
-    if prefix.endswith("-"):
         return None
     unit = m.group(2).lower()
     if unit == "b":
