@@ -324,17 +324,38 @@ def _fetch_and_cache_model_size(model: str):
 
 
 def _parse_model_size_from_string(model: str):
-    # Accept forms like: "llama3:8b", "mistral:7B", "tiny:500m", and standalone like "0.5B" or "500m"
     if not isinstance(model, str):
         return None
     s = model.strip()
-    # Match optional prefix up to ':', then a number (int or decimal) and unit b/m at the end (case-insensitive)
     m = re.search(r"(?i)(?:.*:)?(\d+(?:\.\d+)?)([bm])$", s)
     if not m:
         return None
     try:
         value = float(m.group(1))
     except ValueError:
+        return None
+    if value <= 0:
+        return None
+    if m.start() > 0 and s[m.start() - 1] == "-":
+        return None
+    unit = m.group(2).lower()
+    if unit == "b":
+        return value
+    if unit == "m":
+        return value / 1000.0
+    return None
+    s = model.strip()
+    m = re.search(r"(?i)(?:.*:)?(\d+(?:\.\d+)?)([bm])$", s)
+    if not m:
+        return None
+    try:
+        value = float(m.group(1))
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    prefix = s[: m.start()].rstrip("-")
+    if prefix.endswith("-"):
         return None
     unit = m.group(2).lower()
     if unit == "b":
@@ -345,11 +366,9 @@ def _parse_model_size_from_string(model: str):
 
 
 def _estimate_required_vram_mb(size_billion: float | None):
-    # Coarse mapping based on common quantized footprints
-    # <=7B -> 8GB; <=14B -> 12GB; <=32B -> 24GB; <=70B -> 48GB; else 80GB
     base = 22000
-    if size_billion is None:
-        return base  # Default conservatively to 24GB
+    if size_billion is None or size_billion <= 0:
+        return base
     if size_billion <= 7:
         return 8192
     if size_billion <= 14:
@@ -807,13 +826,25 @@ def _save_last_used(model):
     today = datetime.datetime.today().strftime("%d.%m.%Y")
     rows = []
     models = _abs_path(MODELS_FILE_PATH)
+    if not os.path.exists(models):
+        with open(models, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Model", "LastUsed"])
+            writer.writerow([model, today])
+        return
     with open(models, newline="") as f:
         reader = csv.reader(f)
-        header = next(reader)
+        try:
+            header = next(reader)
+        except StopIteration:
+            header = ["Model", "LastUsed"]
         for row in reader:
-            if len(row) == 2 and row[0] == model:
+            if len(row) >= 2 and row[0] == model:
                 row[1] = today
             rows.append(row)
+    model_found = any(len(r) >= 2 and r[0] == model for r in rows)
+    if not model_found:
+        rows.append([model, today])
 
     with open(models, "w", newline="") as f:
         writer = csv.writer(f)

@@ -64,6 +64,10 @@ def _parse_model_size_from_string(model: str):
         value = float(m.group(1))
     except ValueError:
         return None
+    if value <= 0:
+        return None
+    if m.start() > 0 and s[m.start() - 1] == "-":
+        return None
     unit = m.group(2).lower()
     if unit == "b":
         return value
@@ -74,7 +78,7 @@ def _parse_model_size_from_string(model: str):
 
 def _estimate_required_vram_mb(size_billion: float | None):
     base = 22000
-    if size_billion is None:
+    if size_billion is None or size_billion <= 0:
         return base
     if size_billion <= 7:
         return 8192
@@ -367,13 +371,14 @@ def get_worker_status():
 
 # NEW: Health monitoring utilities
 def ensure_workers_csv_has_healthy_column():
+    path = _abs_path(WORKER_CONFIG_PATH)
     try:
-        df = pd.read_csv(WORKER_CONFIG_PATH)
+        df = pd.read_csv(path)
     except FileNotFoundError:
         return
     if "healthy" not in df.columns:
         df["healthy"] = True
-        df.to_csv(WORKER_CONFIG_PATH, index=False, encoding="utf-8")
+        df.to_csv(path, index=False, encoding="utf-8")
 
 
 def _coerce_bool(val, default=True):
@@ -1204,25 +1209,35 @@ def update_workers_tar(worker_status, tar_file):
 def clean_expired_users():
     today = datetime.today().date()
     temp_file = NamedTemporaryFile(mode="w", delete=False, newline="")
-    get_users()  # Ensure the file exists
+    get_users()
 
-    with open(AUTHORIZED_USERS_CONFIG_PATH, mode="r", newline="") as csvfile, temp_file:
-        reader = csv.DictReader(csvfile)
-        fieldnames = reader.fieldnames
-        writer = csv.DictWriter(temp_file, fieldnames=fieldnames)
-        writer.writeheader()
+    try:
+        with (
+            open(AUTHORIZED_USERS_CONFIG_PATH, mode="r", newline="") as csvfile,
+            temp_file,
+        ):
+            reader = csv.DictReader(csvfile)
+            fieldnames = reader.fieldnames or []
+            writer = csv.DictWriter(temp_file, fieldnames=fieldnames)
+            writer.writeheader()
 
-        for rec in reader:
-            try:
-                row_dict = {k: rec[k] for k in (fieldnames or rec.keys())}
-                exp_str = str(row_dict.get("expirationDate", "")).strip()
-                exp_date = datetime.strptime(exp_str, "%d.%m.%Y").date()
-                if exp_date >= today:
-                    writer.writerow(row_dict)
-            except Exception as e:
-                print(f"Skipping row due to error: {e}")
+            for rec in reader:
+                try:
+                    row_dict = {k: rec[k] for k in (fieldnames or rec.keys())}
+                    exp_str = str(row_dict.get("expirationDate", "")).strip()
+                    exp_date = datetime.strptime(exp_str, "%d.%m.%Y").date()
+                    if exp_date >= today:
+                        writer.writerow(row_dict)
+                except Exception as e:
+                    print(f"Skipping row due to error: {e}")
 
-    os.replace(temp_file.name, AUTHORIZED_USERS_CONFIG_PATH)
+        os.replace(temp_file.name, AUTHORIZED_USERS_CONFIG_PATH)
+    except Exception:
+        try:
+            os.unlink(temp_file.name)
+        except OSError:
+            pass
+        raise
 
 
 def start_cleanup_thread(intervall_hours=2):
