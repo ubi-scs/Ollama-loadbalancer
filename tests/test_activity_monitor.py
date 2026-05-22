@@ -371,6 +371,19 @@ class TestGetProcessGpuMemory:
         assert len(procs) == 1
         assert procs[0]["pid"] == 1234
 
+    @patch("worker_application.activity_monitor._run_command")
+    def test_strips_path_from_process_name(self, mock_run):
+        mock_run.return_value = (
+            0,
+            "233459,/usr/local/bin/ollama,19360\n",
+            "",
+        )
+        procs = get_process_gpu_memory()
+        assert len(procs) == 1
+        assert procs[0]["pid"] == 233459
+        assert procs[0]["name"] == "ollama"
+        assert procs[0]["used_memory_mb"] == 19360
+
 
 class TestGetTotalVramMb:
     @patch("worker_application.activity_monitor._run_command")
@@ -403,6 +416,15 @@ class TestIsGpuVramContended:
             {"pid": 200, "name": "python", "used_memory_mb": 13000},
         ]
         assert is_gpu_vram_contended() is True
+
+    @patch("worker_application.activity_monitor.get_process_gpu_memory")
+    @patch("worker_application.activity_monitor.get_total_vram_mb")
+    def test_full_path_ollama_not_foreign(self, mock_vram, mock_procs):
+        mock_vram.return_value = 24000
+        mock_procs.return_value = [
+            {"pid": 233459, "name": "ollama", "used_memory_mb": 19360},
+        ]
+        assert is_gpu_vram_contended() is False
 
     @patch("worker_application.activity_monitor.get_process_gpu_memory")
     @patch("worker_application.activity_monitor.get_total_vram_mb")

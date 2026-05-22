@@ -452,7 +452,7 @@ def get_process_gpu_memory():
         if len(parts) >= 3:
             try:
                 pid = int(parts[0])
-                name = parts[1].lower()
+                name = os.path.basename(parts[1]).lower()
                 used_mb = float(parts[2])
                 processes.append({"pid": pid, "name": name, "used_memory_mb": used_mb})
             except (ValueError, IndexError):
