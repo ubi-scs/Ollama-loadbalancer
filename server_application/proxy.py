@@ -8,7 +8,7 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from queue import Queue
+from queue import Queue, Empty
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 
@@ -86,9 +86,10 @@ def _ensure_health_counters(name: str):
 
 def _fetch_worker_activity_status(name: str, url: str):
     try:
-        helper_url = (
-            f"{url.replace('11434', '18034').rstrip('/')}/worker/activity-status"
-        )
+        helper_url = _rewrite_url_to_helper_port(url)
+        if helper_url is None:
+            return None
+        helper_url = f"{helper_url.rstrip('/')}/worker/activity-status"
         api_key = os.environ.get("OLLAMA_HELPER_API_KEY", "")
         headers = {}
         if api_key:
@@ -244,6 +245,28 @@ def _probe_worker_health(name: str):
             prev_healthy,
             new_healthy,
         )
+
+
+def _rewrite_url_to_helper_port(worker_url):
+    if not isinstance(worker_url, str) or not re.match(r"^https?://", worker_url):
+        return None
+    if "://" in worker_url:
+        proto, rest = worker_url.split("://", 1)
+        if "/" in rest:
+            host_part, path_part = rest.split("/", 1)
+        else:
+            host_part = rest
+            path_part = ""
+        host_part = re.sub(r":\d+", ":18034", host_part)
+        if ":" not in host_part.split("/")[-1]:
+            host_part = f"{host_part}:18034"
+        if path_part:
+            new_url = f"{proto}://{host_part}/{path_part}"
+        else:
+            new_url = f"{proto}://{host_part}"
+    else:
+        new_url = worker_url
+    return new_url
 
 
 def _abs_path(filename):
@@ -477,7 +500,10 @@ def _fetch_and_cache_worker_vram_if_missing(name: str):
         return
     url = str(row.get("url"))
     try:
-        helper_url = f"{url.replace('11434', '18034').rstrip('/')}/gpu/vram"
+        helper_url = _rewrite_url_to_helper_port(url)
+        if helper_url is None:
+            return
+        helper_url = f"{helper_url.rstrip('/')}/gpu/vram"
         resp = requests.get(
             helper_url,
             headers={"x-api-key": os.environ.get("OLLAMA_HELPER_API_KEY", "")},
@@ -825,8 +851,10 @@ def _save_last_used(model):
         for row in reader:
             if len(row) >= 2 and row[0] == model:
                 row[1] = today
+            elif len(row) == 1 and row[0] == model:
+                row.append(today)
             rows.append(row)
-    model_found = any(len(r) >= 2 and r[0] == model for r in rows)
+    model_found = any(r[0] == model for r in rows if len(r) >= 1)
     if not model_found:
         rows.append([model, today])
 
@@ -1181,8 +1209,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                         log_usage(self.user, duration)
                     except Exception as e:
                         print(f"Failed to log usage for user {self.user}: {e}")
-                if not que.empty():
+                try:
                     que.get_nowait()
+                except Empty:
+                    pass
                 self.add_access_log_entry(
                     event="gen_done",
                     user=self.user,

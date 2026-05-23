@@ -3,7 +3,7 @@ import json
 import os
 import threading
 import time
-from queue import Queue
+from queue import Queue, Empty
 from unittest.mock import patch, MagicMock
 
 import pandas as pd
@@ -654,3 +654,169 @@ class TestParseModelSizeNoDeadCode:
                     f"Unreachable code found after return at index {last_return_index}: "
                     f"statement at index {i} ({ast.unparse(stmt) if hasattr(ast, 'unparse') else str(stmt)})"
                 )
+
+
+class TestQueueDequeueRaceCondition:
+    def test_dequeue_on_empty_queue_does_not_crash(self):
+        q = Queue()
+        try:
+            q.get_nowait()
+        except Empty:
+            pass
+        assert q.empty()
+
+    def test_dequeue_after_put_removes_item(self):
+        q = Queue()
+        q.put(1)
+        try:
+            q.get_nowait()
+        except Empty:
+            pytest.fail("get_nowait raised Empty on a non-empty queue")
+        assert q.empty()
+
+    def test_dequeue_with_try_except_is_safe(self):
+        q = Queue()
+        q.put(1)
+        q.put(2)
+        try:
+            q.get_nowait()
+        except Empty:
+            pytest.fail("Should not raise Empty")
+        try:
+            q.get_nowait()
+        except Empty:
+            pytest.fail("Should not raise Empty")
+        try:
+            q.get_nowait()
+        except Empty:
+            pass
+        assert q.empty()
+
+    def test_concurrent_dequeue_does_not_lose_items(self):
+        q = Queue()
+        num_items = 100
+        for i in range(num_items):
+            q.put(i)
+        consumed = []
+
+        def consumer():
+            while True:
+                try:
+                    item = q.get_nowait()
+                    consumed.append(item)
+                except Empty:
+                    break
+
+        threads = [threading.Thread(target=consumer) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(consumed) == num_items
+
+
+class TestProxyRewriteUrlToHelperPort:
+    def test_url_with_standard_port(self):
+        assert (
+            proxy._rewrite_url_to_helper_port("http://worker:11434")
+            == "http://worker:18034"
+        )
+
+    def test_url_with_standard_port_and_path(self):
+        assert (
+            proxy._rewrite_url_to_helper_port("http://worker:11434/some/path")
+            == "http://worker:18034/some/path"
+        )
+
+    def test_url_with_different_port(self):
+        assert (
+            proxy._rewrite_url_to_helper_port("http://worker:8080/path")
+            == "http://worker:18034/path"
+        )
+
+    def test_url_without_port(self):
+        assert (
+            proxy._rewrite_url_to_helper_port("http://worker") == "http://worker:18034"
+        )
+
+    def test_url_without_port_with_path(self):
+        assert (
+            proxy._rewrite_url_to_helper_port("http://worker/some/path")
+            == "http://worker:18034/some/path"
+        )
+
+    def test_https_url_with_port(self):
+        assert (
+            proxy._rewrite_url_to_helper_port("https://host:11434")
+            == "https://host:18034"
+        )
+
+    def test_https_url_without_port(self):
+        assert proxy._rewrite_url_to_helper_port("https://host") == "https://host:18034"
+
+    def test_hostname_containing_11434_is_not_corrupted(self):
+        result = proxy._rewrite_url_to_helper_port("http://worker11434:11434")
+        assert result == "http://worker11434:18034"
+        assert "worker11434" in result
+
+    def test_already_helper_port(self):
+        assert (
+            proxy._rewrite_url_to_helper_port("http://host:18034/status")
+            == "http://host:18034/status"
+        )
+
+    def test_invalid_url_returns_none(self):
+        assert proxy._rewrite_url_to_helper_port("not-a-url") is None
+
+    def test_non_string_returns_none(self):
+        assert proxy._rewrite_url_to_helper_port(42) is None
+
+    def test_none_returns_none(self):
+        assert proxy._rewrite_url_to_helper_port(None) is None
+
+
+class TestSaveLastUsedFixesMalformedRow:
+    def test_updates_malformed_single_column_row(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _patch_abs_path(tmp_path, monkeypatch)
+        models_path = tmp_path / proxy.MODELS_FILE_PATH
+        with open(models_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Model", "LastUsed"])
+            writer.writerow(["mymodel"])
+            writer.writerow(["other", "01.01.2024"])
+        proxy._save_last_used("mymodel")
+        df = pd.read_csv(models_path)
+        mymodel_rows = df[df["Model"] == "mymodel"]
+        assert len(mymodel_rows) == 1
+        today = time.strftime("%d.%m.%Y")
+        assert mymodel_rows.iloc[0]["LastUsed"] == today
+
+    def test_no_duplicate_rows_after_update(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _patch_abs_path(tmp_path, monkeypatch)
+        models_path = tmp_path / proxy.MODELS_FILE_PATH
+        with open(models_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Model", "LastUsed"])
+            writer.writerow(["mymodel"])
+        proxy._save_last_used("mymodel")
+        df = pd.read_csv(models_path)
+        mymodel_rows = df[df["Model"] == "mymodel"]
+        assert len(mymodel_rows) == 1
+
+    def test_existing_two_column_row_is_updated(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _patch_abs_path(tmp_path, monkeypatch)
+        models_path = tmp_path / proxy.MODELS_FILE_PATH
+        with open(models_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Model", "LastUsed"])
+            writer.writerow(["mymodel", "01.01.2024"])
+        proxy._save_last_used("mymodel")
+        df = pd.read_csv(models_path)
+        mymodel_rows = df[df["Model"] == "mymodel"]
+        assert len(mymodel_rows) == 1
+        today = time.strftime("%d.%m.%Y")
+        assert mymodel_rows.iloc[0]["LastUsed"] == today

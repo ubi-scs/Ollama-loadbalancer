@@ -136,7 +136,10 @@ def _get_worker_vram_total_mb(url: str, name: str, df: pd.DataFrame) -> int | No
                     except Exception:
                         total = None
         if not total or total <= 0:
-            helper_url = f"{str(url).replace('11434', '18034').rstrip('/')}/gpu/vram"
+            helper_url = _rewrite_url_to_helper_port(str(url))
+            if helper_url is None:
+                return total
+            helper_url = f"{helper_url.rstrip('/')}/gpu/vram"
             resp = requests.get(
                 helper_url, headers={"x-api-key": OLLAMA_HELPER_API_KEY}, timeout=5
             )
@@ -248,19 +251,23 @@ def get_worker_status():
                 print(f"GUI: Error fetching /api/ps for server {worker_name}: {e_ps}")
 
             try:
-                gpu_util_url = f"{worker_url.replace('11434', '18034')}/gpu/utilization"
-                response = requests.get(
-                    gpu_util_url,
-                    headers={"x-api-key": OLLAMA_HELPER_API_KEY},
-                    timeout=5,
-                )
-                if response.status_code == 200:
-                    util_data = response.json()
-                    gpu_utilization_str = (
-                        f"{util_data.get('gpu_utilization_percent', 0.0):.1f}%"
-                    )
+                gpu_util_url = _rewrite_url_to_helper_port(worker_url)
+                if gpu_util_url is None:
+                    gpu_utilization_str = "N/A (invalid URL)"
                 else:
-                    gpu_utilization_str = f"Err {response.status_code}"
+                    gpu_util_url = f"{gpu_util_url}/gpu/utilization"
+                    response = requests.get(
+                        gpu_util_url,
+                        headers={"x-api-key": OLLAMA_HELPER_API_KEY},
+                        timeout=5,
+                    )
+                    if response.status_code == 200:
+                        util_data = response.json()
+                        gpu_utilization_str = (
+                            f"{util_data.get('gpu_utilization_percent', 0.0):.1f}%"
+                        )
+                    else:
+                        gpu_utilization_str = f"Err {response.status_code}"
             except Exception as e_util:
                 gpu_utilization_str = "Fetch Error"
                 print(
@@ -269,17 +276,23 @@ def get_worker_status():
 
                 # Fetch VRAM usage
             try:
-                vram_url = f"{worker_url.replace('11434', '18034')}/gpu/vram"
-                response = requests.get(
-                    vram_url, headers={"x-api-key": OLLAMA_HELPER_API_KEY}, timeout=5
-                )
-                if response.status_code == 200:
-                    vram_data = response.json()
-                    used = vram_data.get("vram_used_mb", 0)
-                    total = vram_data.get("vram_total_mb", 1)
-                    vram_usage_str = f"{int(used)}/{int(total)}MB"
+                vram_url = _rewrite_url_to_helper_port(worker_url)
+                if vram_url is None:
+                    vram_usage_str = "N/A (invalid URL)"
                 else:
-                    vram_usage_str = f"Err {response.status_code}"
+                    vram_url = f"{vram_url}/gpu/vram"
+                    response = requests.get(
+                        vram_url,
+                        headers={"x-api-key": OLLAMA_HELPER_API_KEY},
+                        timeout=5,
+                    )
+                    if response.status_code == 200:
+                        vram_data = response.json()
+                        used = vram_data.get("vram_used_mb", 0)
+                        total = vram_data.get("vram_total_mb", 1)
+                        vram_usage_str = f"{int(used)}/{int(total)}MB"
+                    else:
+                        vram_usage_str = f"Err {response.status_code}"
             except Exception as e_vram:
                 vram_usage_str = "Fetch Error"
                 print(
@@ -304,41 +317,41 @@ def get_worker_status():
             # Fetch activity status from worker helper API
             activity_str = "Available"
             try:
-                activity_url = (
-                    f"{worker_url.replace('11434', '18034')}/worker/activity-status"
-                )
-                activity_resp = requests.get(
-                    activity_url,
-                    headers={"x-api-key": OLLAMA_HELPER_API_KEY},
-                    timeout=5,
-                )
-                if activity_resp.status_code == 200:
-                    activity_data = activity_resp.json()
-                    is_disabled = activity_data.get("disabled", False)
-                    if is_disabled:
-                        reason = activity_data.get("last_disable_reason", "")
-                        remaining = activity_data.get("remaining_seconds", 0)
-                        if reason == "user_active":
-                            activity_str = f"Self-disabled (user active, {int(remaining)}s remaining)"
-                        elif reason == "gpu_vram_contended":
-                            activity_str = (
-                                f"Self-disabled (GPU busy, {int(remaining)}s remaining)"
-                            )
-                        else:
-                            activity_str = (
-                                f"Self-disabled ({reason}, {int(remaining)}s remaining)"
-                            )
-                    else:
-                        user_active = activity_data.get("user_active", False)
-                        gpu_contended = activity_data.get("gpu_vram_contended", False)
-                        if user_active:
-                            activity_str = "User active"
-                        elif gpu_contended:
-                            activity_str = "GPU contended"
-                        else:
-                            activity_str = "Available"
+                activity_url = _rewrite_url_to_helper_port(worker_url)
+                if activity_url is None:
+                    activity_str = "N/A (invalid URL)"
                 else:
-                    activity_str = f"Err {activity_resp.status_code}"
+                    activity_url = f"{activity_url}/worker/activity-status"
+                    activity_resp = requests.get(
+                        activity_url,
+                        headers={"x-api-key": OLLAMA_HELPER_API_KEY},
+                        timeout=5,
+                    )
+                    if activity_resp.status_code == 200:
+                        activity_data = activity_resp.json()
+                        is_disabled = activity_data.get("disabled", False)
+                        if is_disabled:
+                            reason = activity_data.get("last_disable_reason", "")
+                            remaining = activity_data.get("remaining_seconds", 0)
+                            if reason == "user_active":
+                                activity_str = f"Self-disabled (user active, {int(remaining)}s remaining)"
+                            elif reason == "gpu_vram_contended":
+                                activity_str = f"Self-disabled (GPU busy, {int(remaining)}s remaining)"
+                            else:
+                                activity_str = f"Self-disabled ({reason}, {int(remaining)}s remaining)"
+                        else:
+                            user_active = activity_data.get("user_active", False)
+                            gpu_contended = activity_data.get(
+                                "gpu_vram_contended", False
+                            )
+                            if user_active:
+                                activity_str = "User active"
+                            elif gpu_contended:
+                                activity_str = "GPU contended"
+                            else:
+                                activity_str = "Available"
+                    else:
+                        activity_str = f"Err {activity_resp.status_code}"
             except Exception as e_activity:
                 activity_str = "N/A"
                 print(
