@@ -20,7 +20,7 @@ CHECK_INTERVAL_SECONDS = int(os.getenv("WORKER_ACTIVITY_CHECK_INTERVAL", "30"))
 IDLE_TIMEOUT_SECONDS = int(os.getenv("WORKER_IDLE_TIMEOUT", "30"))
 VRAM_THRESHOLD_PCT = float(os.getenv("WORKER_VRAM_THRESHOLD_PCT", "25"))
 ALLOWED_PROCESS_NAMES = os.getenv(
-    "WORKER_ALLOWED_GPU_PROCESSES", "ollama,ollama_llm_server,nvidia-smi"
+    "WORKER_ALLOWED_GPU_PROCESSES", "ollama,ollama_llm_server,llama-server,llama_server,nvidia-smi"
 ).split(",")
 
 
@@ -265,9 +265,10 @@ class ActivityMonitor:
 
     def check_now(self):
         user_active = self._is_user_active()
-        gpu_contended = is_gpu_vram_contended(
+        foreign_procs = get_foreign_gpu_processes(
             vram_threshold_pct=self.vram_threshold_pct
         )
+        gpu_contended = len(foreign_procs) > 0
 
         now = time.time()
 
@@ -313,11 +314,17 @@ class ActivityMonitor:
                 self._disabled_until = now + self.disable_cooldown
                 reason = "gpu_vram_contended"
                 if not was_disabled:
+                    proc_details = ", ".join(
+                        f"PID={p['pid']} name={p['name']} vram={p['used_memory_mb']:.0f}MB"
+                        for p in foreign_procs
+                    )
                     logger.info(
                         "Worker self-disabling: GPU VRAM contention detected "
-                        "(foreign process using >=%.0f%% of VRAM). "
+                        "(>=%.0f%% of VRAM threshold). "
+                        "Foreign process(es): %s. "
                         "Worker will be unavailable for %ds.",
                         self.vram_threshold_pct,
+                        proc_details,
                         self.disable_cooldown,
                     )
                 else:
@@ -411,11 +418,11 @@ class ActivityMonitor:
             return status
 
 
-def is_gpu_vram_contended(total_vram_mb=None, vram_threshold_pct=None):
+def get_foreign_gpu_processes(total_vram_mb=None, vram_threshold_pct=None):
     if total_vram_mb is None:
         total_vram_mb = get_total_vram_mb()
     if total_vram_mb <= 0:
-        return False
+        return []
     if vram_threshold_pct is None:
         vram_threshold_pct = VRAM_THRESHOLD_PCT
 
@@ -425,15 +432,20 @@ def is_gpu_vram_contended(total_vram_mb=None, vram_threshold_pct=None):
     own_pid = os.getpid()
     allowed_names_lower = [n.strip().lower() for n in ALLOWED_PROCESS_NAMES]
 
+    foreign = []
     for proc in processes:
         if proc["pid"] == own_pid:
             continue
         if proc["name"] in allowed_names_lower:
             continue
         if proc["used_memory_mb"] >= threshold_mb:
-            return True
+            foreign.append(proc)
 
-    return False
+    return foreign
+
+
+def is_gpu_vram_contended(total_vram_mb=None, vram_threshold_pct=None):
+    return len(get_foreign_gpu_processes(total_vram_mb, vram_threshold_pct)) > 0
 
 
 def get_process_gpu_memory():

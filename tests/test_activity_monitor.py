@@ -13,6 +13,7 @@ from worker_application.activity_monitor import (
     _is_screensaver_active,
     get_process_gpu_memory,
     get_total_vram_mb,
+    get_foreign_gpu_processes,
     is_gpu_vram_contended,
     _run_command,
     DISABLE_COOLDOWN_SECONDS,
@@ -464,9 +465,9 @@ class TestIsGpuVramContended:
 
 
 class TestActivityMonitor:
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_initial_state_is_enabled(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         mock_input = MagicMock()
         mock_input.is_available.return_value = False
@@ -475,25 +476,25 @@ class TestActivityMonitor:
             monitor.check_now()
             assert monitor.is_disabled() is False
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_user_active_disables_monitor(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         with patch.object(monitor, "_is_user_active", return_value=True):
             monitor.check_now()
             assert monitor.is_disabled() is True
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_gpu_contended_disables_monitor(self, mock_gpu):
-        mock_gpu.return_value = True
+        mock_gpu.return_value = [{"pid": 200, "name": "python", "used_memory_mb": 13000}]
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         with patch.object(monitor, "_is_user_active", return_value=False):
             monitor.check_now()
             assert monitor.is_disabled() is True
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_cooldown_extends_on_repeated_activity(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=10)
         with patch.object(monitor, "_is_user_active", return_value=True):
             monitor.check_now()
@@ -503,9 +504,9 @@ class TestActivityMonitor:
             monitor.check_now()
             assert monitor._disabled_until >= first_disabled_until
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_becomes_enabled_after_cooldown(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=1)
         with patch.object(monitor, "_is_user_active", return_value=True):
             monitor.check_now()
@@ -516,9 +517,9 @@ class TestActivityMonitor:
             monitor.check_now()
             assert monitor.is_disabled() is False
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_get_status_returns_correct_fields(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         with patch.object(monitor, "_is_user_active", return_value=False):
             monitor.check_now()
@@ -531,9 +532,9 @@ class TestActivityMonitor:
             assert "last_check_time" in status
             assert "last_disable_reason" in status
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_status_shows_disable_reason_user_active(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         with patch.object(monitor, "_is_user_active", return_value=True):
             monitor.check_now()
@@ -542,9 +543,9 @@ class TestActivityMonitor:
             assert status["last_disable_reason"] == "user_active"
             assert status["user_active"] is True
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_status_shows_disable_reason_gpu(self, mock_gpu):
-        mock_gpu.return_value = True
+        mock_gpu.return_value = [{"pid": 200, "name": "python", "used_memory_mb": 13000}]
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         with patch.object(monitor, "_is_user_active", return_value=False):
             monitor.check_now()
@@ -553,9 +554,9 @@ class TestActivityMonitor:
             assert status["last_disable_reason"] == "gpu_vram_contended"
             assert status["gpu_vram_contended"] is True
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_remaining_seconds_decreases(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         with patch.object(monitor, "_is_user_active", return_value=True):
             monitor.check_now()
@@ -569,8 +570,8 @@ class TestActivityMonitor:
         with (
             patch.object(monitor, "_is_user_active", return_value=False),
             patch(
-                "worker_application.activity_monitor.is_gpu_vram_contended",
-                return_value=False,
+                "worker_application.activity_monitor.get_foreign_gpu_processes",
+                return_value=[],
             ),
         ):
             monitor.start()
@@ -583,8 +584,8 @@ class TestActivityMonitor:
         with (
             patch.object(monitor, "_is_user_active", return_value=False),
             patch(
-                "worker_application.activity_monitor.is_gpu_vram_contended",
-                return_value=False,
+                "worker_application.activity_monitor.get_foreign_gpu_processes",
+                return_value=[],
             ),
         ):
             monitor.start()
@@ -597,9 +598,9 @@ class TestActivityMonitor:
         monitor.stop()
         assert monitor._running is False
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_disabled_until_is_zero_when_enabled(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         with patch.object(monitor, "_is_user_active", return_value=False):
             monitor.check_now()
@@ -607,9 +608,9 @@ class TestActivityMonitor:
             assert status["disabled"] is False
             assert status["disabled_until"] == 0
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_cooldown_period_keeps_disabled(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         cooldown = 5
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=cooldown)
         with patch.object(monitor, "_is_user_active", return_value=True):
@@ -620,9 +621,9 @@ class TestActivityMonitor:
             monitor.check_now()
             assert monitor.is_disabled() is True
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_env_vars_override_defaults(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         with patch.dict(
             os.environ,
             {
@@ -649,9 +650,9 @@ class TestActivityMonitor:
             os.environ.pop("WORKER_IDLE_TIMEOUT", None)
             importlib.reload(am)
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_status_includes_idle_info_with_input_monitor(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         mock_input = MagicMock()
         mock_input.is_available.return_value = True
@@ -669,9 +670,9 @@ class TestActivityMonitor:
 
 
 class TestActivityMonitorBackgroundThread:
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_monitor_detects_changes_in_background(self, mock_gpu):
-        mock_gpu.return_value = False
+        mock_gpu.return_value = []
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=10)
         with patch.object(monitor, "_is_user_active", return_value=True):
             monitor.start()
@@ -684,21 +685,21 @@ class TestActivityMonitorBackgroundThread:
 
         monitor.stop()
 
-    @patch("worker_application.activity_monitor.is_gpu_vram_contended")
+    @patch("worker_application.activity_monitor.get_foreign_gpu_processes")
     def test_monitor_handles_exceptions_gracefully(self, mock_gpu):
         call_count = 0
 
-        def side_effect():
+        def side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise RuntimeError("test error")
-            return False
+            return []
 
-        mock_gpu.return_value = False
+        mock_gpu.side_effect = side_effect
 
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=10)
-        with patch.object(monitor, "_is_user_active", side_effect=side_effect):
+        with patch.object(monitor, "_is_user_active", side_effect=lambda: False):
             monitor.start()
             time.sleep(3)
             assert monitor._running is True
