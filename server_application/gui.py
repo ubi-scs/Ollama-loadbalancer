@@ -891,24 +891,24 @@ def add_missing_models_generator():
         for model_name in models:
             # Respect VRAM fit before pulling
             size_b = _parse_model_size_from_string(model_name)
-            if size_b is None:
-                logs.append(
-                    f"  - Skipping {model_name}: missing or invalid size tag; expected like ':7b' or ':500m'"
-                )
-                yield "\n".join(logs)
-                continue
-            required_vram = _estimate_required_vram_mb(size_b)
-            total_vram = _get_worker_vram_total_mb(url, worker_name, workers_df)
-            if (
-                isinstance(total_vram, (int, float))
-                and total_vram is not None
-                and total_vram < required_vram
-            ):
-                logs.append(
-                    f"  - Skipping {model_name}: requires ~{int(required_vram)}MB VRAM, {worker_name} has {int(total_vram)}MB"
-                )
-                yield "\n".join(logs)
-                continue
+            # if size_b is None:
+            #     logs.append(
+            #         f"  - Skipping {model_name}: missing or invalid size tag; expected like ':7b' or ':500m'"
+            #     )
+            #     yield "\n".join(logs)
+            #     continue
+            #required_vram = _estimate_required_vram_mb(size_b)
+            #total_vram = _get_worker_vram_total_mb(url, worker_name, workers_df)
+            # if (
+            #     isinstance(total_vram, (int, float))
+            #     and total_vram is not None
+            #     and total_vram < required_vram
+            # ):
+            #     logs.append(
+            #         f"  - Skipping {model_name}: requires ~{int(required_vram)}MB VRAM, {worker_name} has {int(total_vram)}MB"
+            #     )
+            #     yield "\n".join(logs)
+            #     continue
 
             last_reported_percent = -1
             try:
