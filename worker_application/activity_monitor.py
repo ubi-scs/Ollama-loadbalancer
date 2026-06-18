@@ -182,8 +182,15 @@ def _is_session_idle_loginctl(session_id):
     code, out, err = _run_command(
         ["loginctl", "show-session", str(session_id), "-p", "IdleHint"]
     )
-    if code == 0 and "yes" in out.lower():
-        return True
+    if code != 0:
+        return None
+    for line in out.splitlines():
+        if "=" in line:
+            val = line.split("=", 1)[1].strip().lower()
+            if val == "yes":
+                return True
+            if val == "no":
+                return False
     return None
 
 
@@ -208,6 +215,40 @@ def _is_screensaver_active():
     return None
 
 
+def _is_user_idle_x_idle(timeout_secs):
+    """Check X idle time via xprintidle. Returns True/False/None."""
+    code, out, err = _run_command(
+        ["xprintidle"], timeout=5
+    )
+    if code != 0 or not out.strip():
+        return None
+    try:
+        idle_ms = int(out.strip())
+        return idle_ms >= timeout_secs * 1000
+    except (ValueError, IndexError):
+        return None
+
+
+def _is_user_idle_gnome_dbus(timeout_secs):
+    """Check GNOME idle time via Mutter IdleMonitor. Returns True/False/None."""
+    code, out, err = _run_command(
+        [
+            "gdbus", "call", "--session",
+            "--dest=org.gnome.Mutter.IdleMonitor",
+            "--object-path=/org/gnome/Mutter/IdleMonitor/Core",
+            "--method=org.gnome.Mutter.IdleMonitor.GetIdletime",
+        ],
+        timeout=5,
+    )
+    if code != 0 or not out.strip():
+        return None
+    try:
+        idle_us = int(out.strip().strip("(,)").split()[-1])
+        return idle_us / 1_000_000 >= timeout_secs
+    except (ValueError, IndexError):
+        return None
+
+
 def _is_user_idle_loginctl():
     sessions = get_sessions()
     if not sessions:
@@ -222,7 +263,7 @@ def _is_user_idle_loginctl():
             screensaver = _is_screensaver_active()
             if screensaver is True:
                 return True
-    return False
+    return None
 
 
 class ActivityMonitor:
@@ -256,11 +297,17 @@ class ActivityMonitor:
     def _is_user_active(self):
         if self._input_monitor.is_available():
             return self._input_monitor.is_user_active()
+        idle = _is_user_idle_x_idle(self.idle_timeout)
+        if idle is not None:
+            return not idle
+        idle = _is_user_idle_gnome_dbus(self.idle_timeout)
+        if idle is not None:
+            return not idle
         loginctl_idle = _is_user_idle_loginctl()
-        if loginctl_idle is False:
-            return True
         if loginctl_idle is True:
             return False
+        if loginctl_idle is False:
+            return True
         return False
 
     def check_now(self):

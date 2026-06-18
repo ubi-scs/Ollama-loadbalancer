@@ -11,6 +11,8 @@ from worker_application.activity_monitor import (
     _is_session_idle_loginctl,
     _is_user_idle_loginctl,
     _is_screensaver_active,
+    _is_user_idle_x_idle,
+    _is_user_idle_gnome_dbus,
     get_process_gpu_memory,
     get_total_vram_mb,
     get_foreign_gpu_processes,
@@ -118,7 +120,7 @@ class TestIsSessionIdleLoginctl:
     @patch("worker_application.activity_monitor._run_command")
     def test_idle_no(self, mock_run):
         mock_run.return_value = (0, "IdleHint=no", "")
-        assert _is_session_idle_loginctl("1") is None
+        assert _is_session_idle_loginctl("1") is False
 
     @patch("worker_application.activity_monitor._run_command")
     def test_idle_on_failure(self, mock_run):
@@ -178,7 +180,7 @@ class TestIsUserIdleLoginctl:
         mock_sessions.return_value = [{"session_id": "1", "type": "wayland"}]
         mock_idle.return_value = None
         mock_ss.return_value = False
-        assert _is_user_idle_loginctl() is False
+        assert _is_user_idle_loginctl() is None
 
     @patch("worker_application.activity_monitor._is_screensaver_active")
     @patch("worker_application.activity_monitor._is_session_idle_loginctl")
@@ -199,7 +201,7 @@ class TestIsUserIdleLoginctl:
     def test_unspecified_session_skipped(self, mock_sessions, mock_idle):
         mock_sessions.return_value = [{"session_id": "1", "type": "unspecified"}]
         mock_idle.return_value = None
-        assert _is_user_idle_loginctl() is False
+        assert _is_user_idle_loginctl() is None
 
 
 class TestInputDeviceMonitor:
@@ -289,8 +291,10 @@ class TestInputDeviceMonitor:
 
 
 class TestActivityMonitorIsUserActive:
+    @patch("worker_application.activity_monitor._is_user_idle_x_idle")
+    @patch("worker_application.activity_monitor._is_user_idle_gnome_dbus")
     @patch("worker_application.activity_monitor._is_user_idle_loginctl")
-    def test_uses_input_monitor_when_available(self, mock_loginctl):
+    def test_uses_input_monitor_when_available(self, mock_loginctl, mock_gnome, mock_x):
         mock_loginctl.return_value = False
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         mock_input = MagicMock()
@@ -301,9 +305,13 @@ class TestActivityMonitorIsUserActive:
         assert monitor._is_user_active() is True
         mock_input.is_user_active.assert_called_once()
 
+    @patch("worker_application.activity_monitor._is_user_idle_x_idle")
+    @patch("worker_application.activity_monitor._is_user_idle_gnome_dbus")
     @patch("worker_application.activity_monitor._is_user_idle_loginctl")
-    def test_falls_back_to_loginctl_when_input_unavailable(self, mock_loginctl):
+    def test_falls_back_to_loginctl_when_input_unavailable(self, mock_loginctl, mock_gnome, mock_x):
         mock_loginctl.return_value = False
+        mock_gnome.return_value = None
+        mock_x.return_value = None
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         mock_input = MagicMock()
         mock_input.is_available.return_value = False
@@ -313,9 +321,13 @@ class TestActivityMonitorIsUserActive:
         assert result is True
         mock_loginctl.assert_called()
 
+    @patch("worker_application.activity_monitor._is_user_idle_x_idle")
+    @patch("worker_application.activity_monitor._is_user_idle_gnome_dbus")
     @patch("worker_application.activity_monitor._is_user_idle_loginctl")
-    def test_loginctl_idle_means_not_active(self, mock_loginctl):
+    def test_loginctl_idle_means_not_active(self, mock_loginctl, mock_gnome, mock_x):
         mock_loginctl.return_value = True
+        mock_gnome.return_value = None
+        mock_x.return_value = None
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         mock_input = MagicMock()
         mock_input.is_available.return_value = False
@@ -323,9 +335,13 @@ class TestActivityMonitorIsUserActive:
 
         assert monitor._is_user_active() is False
 
+    @patch("worker_application.activity_monitor._is_user_idle_x_idle")
+    @patch("worker_application.activity_monitor._is_user_idle_gnome_dbus")
     @patch("worker_application.activity_monitor._is_user_idle_loginctl")
-    def test_loginctl_none_means_not_active(self, mock_loginctl):
+    def test_loginctl_none_means_not_active(self, mock_loginctl, mock_gnome, mock_x):
         mock_loginctl.return_value = None
+        mock_gnome.return_value = None
+        mock_x.return_value = None
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         mock_input = MagicMock()
         mock_input.is_available.return_value = False
@@ -333,8 +349,10 @@ class TestActivityMonitorIsUserActive:
 
         assert monitor._is_user_active() is False
 
+    @patch("worker_application.activity_monitor._is_user_idle_x_idle")
+    @patch("worker_application.activity_monitor._is_user_idle_gnome_dbus")
     @patch("worker_application.activity_monitor._is_user_idle_loginctl")
-    def test_input_monitor_idle_takes_priority_over_loginctl(self, mock_loginctl):
+    def test_input_monitor_idle_takes_priority_over_loginctl(self, mock_loginctl, mock_gnome, mock_x):
         monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
         mock_input = MagicMock()
         mock_input.is_available.return_value = True
@@ -342,6 +360,40 @@ class TestActivityMonitorIsUserActive:
         monitor._input_monitor = mock_input
 
         assert monitor._is_user_active() is False
+        mock_loginctl.assert_not_called()
+
+    @patch("worker_application.activity_monitor._is_user_idle_x_idle")
+    @patch("worker_application.activity_monitor._is_user_idle_gnome_dbus")
+    @patch("worker_application.activity_monitor._is_user_idle_loginctl")
+    def test_x_idle_detected_first(self, mock_loginctl, mock_gnome, mock_x):
+        mock_x.return_value = True
+        mock_gnome.return_value = None
+        mock_loginctl.return_value = None
+        monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
+        mock_input = MagicMock()
+        mock_input.is_available.return_value = False
+        monitor._input_monitor = mock_input
+
+        assert monitor._is_user_active() is False
+        mock_x.assert_called()
+        mock_gnome.assert_not_called()
+        mock_loginctl.assert_not_called()
+
+    @patch("worker_application.activity_monitor._is_user_idle_x_idle")
+    @patch("worker_application.activity_monitor._is_user_idle_gnome_dbus")
+    @patch("worker_application.activity_monitor._is_user_idle_loginctl")
+    def test_gnome_dbus_fallback(self, mock_loginctl, mock_gnome, mock_x):
+        mock_x.return_value = None
+        mock_gnome.return_value = False
+        mock_loginctl.return_value = None
+        monitor = ActivityMonitor(check_interval=1, disable_cooldown=60)
+        mock_input = MagicMock()
+        mock_input.is_available.return_value = False
+        monitor._input_monitor = mock_input
+
+        assert monitor._is_user_active() is True
+        mock_x.assert_called()
+        mock_gnome.assert_called()
         mock_loginctl.assert_not_called()
 
 
