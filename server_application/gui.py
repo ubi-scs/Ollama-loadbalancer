@@ -518,6 +518,20 @@ def get_logs(num_lines):
         return f"Error reading log file: {str(e)}"
 
 
+def deduplicate_global_models():
+    if not os.path.exists(MODELS_CONFIG_PATH):
+        return
+    models = pd.read_csv(MODELS_CONFIG_PATH)
+    if models.empty:
+        return
+    before = len(models)
+    models = models.drop_duplicates(subset=["Model"], keep="first")
+    after = len(models)
+    if before != after:
+        print(f"Removed {before - after} duplicate model(s) from {MODELS_CONFIG_PATH}")
+        models.to_csv(MODELS_CONFIG_PATH, index=False, encoding="utf-8")
+
+
 def get_global_models():
     if not os.path.exists(MODELS_CONFIG_PATH):
         print("GUI Warning: Models config file not found. Creating new file.")
@@ -764,10 +778,15 @@ def add_global_model(model_name):
 
     gr.Info("Update process finished.")
 
-    new_model = pd.DataFrame(
-        [{"Model": model_name, "LastUsed": datetime.today().strftime("%d.%m.%Y")}]
-    )
-    models = pd.concat([pd.read_csv(MODELS_CONFIG_PATH), new_model], ignore_index=True)
+    today = datetime.today().strftime("%d.%m.%Y")
+    existing = pd.read_csv(MODELS_CONFIG_PATH)
+    if model_name in existing["Model"].values:
+        existing.loc[existing["Model"] == model_name, "LastUsed"] = today
+        models = existing
+        gr.Info(f"Model {model_name} is already in the global list — updated last-used date.")
+    else:
+        new_model = pd.DataFrame([{"Model": model_name, "LastUsed": today}])
+        models = pd.concat([existing, new_model], ignore_index=True)
 
     models.to_csv(MODELS_CONFIG_PATH, index=False, encoding="utf-8")
     return get_global_models()
@@ -1774,6 +1793,7 @@ def main():
     else:
         ensure_workers_csv_has_healthy_column()
     get_users()
+    deduplicate_global_models()
     get_global_models()
     get_logs(1)
 
